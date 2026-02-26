@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from app.schemas.user import User as UserSchema
@@ -9,41 +9,68 @@ from app.api.deps import get_current_user_token
 router = APIRouter(
     prefix="/auth",
     tags=["auth"],
-    responses={404: {"description": "Not found"}},
 )
 
-@router.post("/sync", response_model=UserSchema)
-async def sync_user(
+@router.post("/signup", response_model=UserSchema, status_code=status.HTTP_201_CREATED)
+async def signup(
     token_data: dict = Depends(get_current_user_token),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Unified Auth Endpoint:
-    1. Verifies the Firebase Token (via dependency).
-    2. Checks if the user exists in Postgres.
-    3. If NOT (Registration flow): Creates the user.
-    4. If YES (Login flow): Returns the user.
+    Registration Endpoint:
+    Call this ONLY when a user signs up for the first time.
+    It creates their record in Postgres.
     """
     firebase_uid = token_data.get("uid")
     email = token_data.get("email")
+
+    # 1. Check if user already exists
+    result = await db.execute(select(UserModel).where(UserModel.firebase_uid == firebase_uid))
+    existing_user = result.scalars().first()
+
+    if existing_user:
+        raise HTTPException(
+            status_code=400,
+            detail="User already registered. Please log in."
+        )
+
+    # 2. Create new user
+    new_user = UserModel(
+        firebase_uid=firebase_uid,
+        email=email,
+        username=email.split("@")[0],
+        role="patient",
+        medical_profile={}
+    )
     
-    # 1. Try to find the user in our database
+    db.add(new_user)
+    await db.commit()
+    await db.refresh(new_user)
+    
+    return new_user
+
+
+@router.post("/login", response_model=UserSchema)
+async def login(
+    token_data: dict = Depends(get_current_user_token),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Login Endpoint:
+    Call this when a returning user signs in.
+    It retrieves their profile from Postgres.
+    """
+    firebase_uid = token_data.get("uid")
+
+    # 1. Fetch user
     result = await db.execute(select(UserModel).where(UserModel.firebase_uid == firebase_uid))
     user = result.scalars().first()
-    
-    # 2. If user doesn't exist, create them (Registration Logic)
+
+    # 2. Strict Check: If they aren't in Postgres, they haven't signed up
     if not user:
-        new_user = UserModel(
-            firebase_uid=firebase_uid,
-            email=email,
-            username=email.split("@")[0], # Default username from email
-            role="patient",               # Default role
-            medical_profile={}            # Initialize empty profile
+        raise HTTPException(
+            status_code=404,
+            detail="User profile not found. Please sign up first."
         )
-        db.add(new_user)
-        await db.commit()
-        await db.refresh(new_user)
-        return new_user
     
-    # 3. If user exists, just return them (Login Logic)
     return user
