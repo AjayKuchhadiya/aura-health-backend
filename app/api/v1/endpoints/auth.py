@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query # <--- Import Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -15,11 +15,11 @@ router = APIRouter(
 )
 class SignupRequest(BaseModel):
     name: Optional[str] = None
-
+    role: str = "patient" 
 
 @router.post("/signup", response_model=PatientSchema, status_code=status.HTTP_201_CREATED)
 async def signup(
-    signup_data: SignupRequest,  # <--- Added this to accept the frontend payload
+    signup_data: SignupRequest,
     token_data: dict = Depends(get_current_user_token),
     db: AsyncSession = Depends(get_db)
 ):
@@ -28,10 +28,17 @@ async def signup(
     Call this ONLY when a user signs up for the first time.
     It creates their record in Postgres.
     """
+    # VALIDATE THE ROLE (Security best practice)
+    if signup_data.role not in ["patient", "doctor"]:
+        raise HTTPException(
+            status_code=400, 
+            detail="Invalid role. Must be 'patient' or 'doctor'."
+        )
+
     firebase_uid = token_data.get("uid")
     email = token_data.get("email")
 
-    # 1. Check if user already exists
+    # Check if user already exists
     result = await db.execute(select(UserModel).where(UserModel.firebase_uid == firebase_uid))
     existing_user = result.scalars().first()
 
@@ -41,8 +48,7 @@ async def signup(
             detail="User already registered. Please log in."
         )
 
-    # 2. Determine the username
-    # If frontend sends a name, use it. Otherwise, fallback to the part of the email before '@'
+    # Determine the username
     final_username = signup_data.name if signup_data.name else email.split("@")[0]
 
     # 3. Create new user
@@ -50,7 +56,7 @@ async def signup(
         firebase_uid=firebase_uid,
         email=email,
         username=final_username, 
-        role="patient",
+        role=signup_data.role, 
         medical_profile={}
     )
     
