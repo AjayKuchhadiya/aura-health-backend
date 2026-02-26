@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from app.schemas.user import User as UserSchema
+from app.schemas.patient import Patient as PatientSchema
 from app.models.user import User as UserModel
 from app.core.database import get_db
 from app.api.deps import get_current_user_token
@@ -11,7 +11,7 @@ router = APIRouter(
     tags=["auth"],
 )
 
-@router.post("/signup", response_model=UserSchema, status_code=status.HTTP_201_CREATED)
+@router.post("/signup", response_model=PatientSchema, status_code=status.HTTP_201_CREATED)
 async def signup(
     token_data: dict = Depends(get_current_user_token),
     db: AsyncSession = Depends(get_db)
@@ -50,7 +50,7 @@ async def signup(
     return new_user
 
 
-@router.post("/login", response_model=UserSchema)
+@router.post("/login", response_model=PatientSchema)
 async def login(
     token_data: dict = Depends(get_current_user_token),
     db: AsyncSession = Depends(get_db)

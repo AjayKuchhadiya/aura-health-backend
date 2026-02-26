@@ -1,40 +1,99 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.schemas.user import User, UserCreate, UserUpdate
+from sqlalchemy.future import select
+
 from app.core.database import get_db
+from app.api.deps import get_current_user_token
+from app.models.user import User as UserModel
+from app.models.doctor import Doctor as DoctorModel
+from app.schemas.patient import PatientOnboarding, PatientProfileResponse
+from app.schemas.doctor import DoctorOnboarding, DoctorProfileResponse
 
 router = APIRouter(
     prefix="/users",
     tags=["users"],
-    responses={404: {"description": "Not found"}},
 )
 
-@router.get("/", response_model=list[User])
-async def get_users(db: AsyncSession = Depends(get_db)):
-    """Get all users"""
-    # TODO: Implement get all users logic
-    pass
+@router.post("/patient-profile", response_model=PatientProfileResponse)
+async def onboard_patient(
+    onboarding_data: PatientOnboarding,
+    token_data: dict = Depends(get_current_user_token),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Create/Update Patient Profile
+    """
+    firebase_uid = token_data.get("uid")
+    
+    result = await db.execute(select(UserModel).where(UserModel.firebase_uid == firebase_uid))
+    user = result.scalars().first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-@router.get("/{user_id}", response_model=User)
-async def get_user(user_id: int, db: AsyncSession = Depends(get_db)):
-    """Get user by ID"""
-    # TODO: Implement get user logic
-    pass
+    # Store the entire payload in the JSONB column
+    user.medical_profile = onboarding_data.model_dump()
+    user.role = "patient"
+    
+    await db.commit()
+    await db.refresh(user)
+    
+    # Return wrapped response matching the contract
+    return {
+        "message": "Patient profile created successfully",
+        "data": user
+    }
 
-@router.post("/", response_model=User)
-async def create_user(user: UserCreate, db: AsyncSession = Depends(get_db)):
-    """Create a new user"""
-    # TODO: Implement create user logic
-    pass
 
-@router.put("/{user_id}", response_model=User)
-async def update_user(user_id: int, user_update: UserUpdate, db: AsyncSession = Depends(get_db)):
-    """Update user"""
-    # TODO: Implement update user logic
-    pass
+@router.post("/doctor-profile", response_model=DoctorProfileResponse)
+async def onboard_doctor(
+    onboarding_data: DoctorOnboarding,
+    token_data: dict = Depends(get_current_user_token),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Create/Update Doctor Profile
+    """
+    firebase_uid = token_data.get("uid")
+    
+    result = await db.execute(select(UserModel).where(UserModel.firebase_uid == firebase_uid))
+    user = result.scalars().first()
+    
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-@router.delete("/{user_id}")
-async def delete_user(user_id: int, db: AsyncSession = Depends(get_db)):
-    """Delete user"""
-    # TODO: Implement delete user logic
-    pass
+    doc_result = await db.execute(select(DoctorModel).where(DoctorModel.user_id == user.id))
+    existing_doctor = doc_result.scalars().first()
+    
+    if existing_doctor:
+        raise HTTPException(status_code=400, detail="Doctor profile already exists for this user")
+
+    user.role = "doctor"
+    if onboarding_data.name:
+        user.username = onboarding_data.name
+
+    education_dicts = [edu.model_dump() for edu in onboarding_data.education]
+
+    new_doctor = DoctorModel(
+        user_id=user.id,
+        name=onboarding_data.name,
+        specialization=onboarding_data.specialization,
+        license_number=onboarding_data.license_number,
+        years_of_experience=onboarding_data.years_of_experience,
+        education=education_dicts,
+        certifications=onboarding_data.certifications,
+        languages=onboarding_data.languages,
+        bio=onboarding_data.bio,
+        consultation_fee=onboarding_data.consultation_fee,
+        availability=onboarding_data.availability
+    )
+    
+    db.add(new_doctor)
+    await db.commit()
+    await db.refresh(new_doctor)
+    
+    # Return wrapped response matching the contract
+    return {
+        "message": "Doctor profile created successfully",
+        "data": new_doctor
+    }

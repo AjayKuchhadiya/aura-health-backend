@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.schemas.doctor import Doctor, DoctorCreate, DoctorUpdate
+# from app.schemas.doctor import Doctor, DoctorCreate, DoctorUpdate
 from app.core.database import get_db
 
 router = APIRouter(
