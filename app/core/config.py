@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 from pathlib import Path
 
@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     
+    # Firebase
+    FIREBASE_CREDENTIALS: Optional[str] = None
+    
     # AWS/R2 Configuration
     AWS_ACCESS_KEY_ID: Optional[str] = None
     AWS_SECRET_ACCESS_KEY: Optional[str] = None
@@ -26,9 +29,11 @@ class Settings(BaseSettings):
     # External Services
     GOOGLE_VISION_API_KEY: Optional[str] = None
     
-    class Config:
-        # Look for .env in the project root (parent of app directory)
-        env_file = str(Path(__file__).parent.parent.parent / ".env")
-        case_sensitive = True
+    # This configuration allows extra fields in .env without crashing
+    model_config = SettingsConfigDict(
+        env_file=str(Path(__file__).parent.parent.parent / ".env"),
+        case_sensitive=True,
+        extra="ignore"
+    )
 
 settings = Settings()

@@ -1,44 +1,68 @@
-"""Alembic script configuration and utilities"""
-
-from alembic import context
-from sqlalchemy import engine_from_config, pool
+import sys
+import os
 from logging.config import fileConfig
-from app.core.database import Base
 
-# this is the Alembic Config object
+from sqlalchemy import engine_from_config
+from sqlalchemy import pool
+from alembic import context
+
+# Add the project root to the python path
+sys.path.append(os.getcwd())
+
+# Import Base and Settings
+from app.core.database import Base
+from app.core.config import settings
+from app.models.user import User
+from app.models.doctor import Doctor
+
 config = context.config
 
-# Interpret the config file for Python logging
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# add your model's MetaData object here for 'autogenerate' support
 target_metadata = Base.metadata
 
+def get_url():
+    # Force sync driver for migrations
+    return settings.DATABASE_URL.replace("postgresql+asyncpg", "postgresql")
+
+def include_object(object, name, type_, reflected, compare_to):
+    """
+    Helper to tell Alembic to ignore certain tables.
+    We want to ignore 'spatial_ref_sys' because it's managed by PostGIS, not us.
+    """
+    if type_ == "table" and name == "spatial_ref_sys":
+        return False
+    return True
+
 def run_migrations_offline() -> None:
-    """Run migrations in 'offline' mode."""
-    url = config.get_main_option("sqlalchemy.url")
+    url = get_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,  # <--- Added filter
     )
 
     with context.begin_transaction():
         context.run_migrations()
 
 def run_migrations_online() -> None:
-    """Run migrations in 'online' mode."""
+    configuration = config.get_section(config.config_ini_section)
+    configuration["sqlalchemy.url"] = get_url()
+    
     connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
+        configuration,
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
 
     with connectable.connect() as connection:
         context.configure(
-            connection=connection, target_metadata=target_metadata
+            connection=connection, 
+            target_metadata=target_metadata,
+            include_object=include_object, # <--- Added filter
         )
 
         with context.begin_transaction():
