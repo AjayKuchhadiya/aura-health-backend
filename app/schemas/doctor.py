@@ -8,7 +8,7 @@ class EducationItem(BaseModel):
     year: str  
 
 class DoctorOnboarding(BaseModel):
-    name: str
+    name: Optional[str] = None  # <--- Made optional
     specialization: str
     license_number: str
     years_of_experience: int
@@ -18,6 +18,12 @@ class DoctorOnboarding(BaseModel):
     bio: Optional[str] = None
     consultation_fee: Optional[float] = 0.0
     availability: Optional[Dict[str, Any]] = {"days": [], "hours": ""}
+    
+    # Accept these fields if the frontend sends them, but make them optional
+    is_verified: Optional[bool] = False
+    is_available: Optional[bool] = True
+    rating: Optional[float] = 0.0
+    total_consultations: Optional[int] = 0
 
 class Doctor(DoctorOnboarding):
     id: int

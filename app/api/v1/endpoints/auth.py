@@ -1,6 +1,9 @@
+from pydantic import BaseModel
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+
 from app.schemas.patient import Patient as PatientSchema
 from app.models.user import User as UserModel
 from app.core.database import get_db
@@ -10,9 +13,13 @@ router = APIRouter(
     prefix="/auth",
     tags=["auth"],
 )
+class SignupRequest(BaseModel):
+    name: Optional[str] = None
+
 
 @router.post("/signup", response_model=PatientSchema, status_code=status.HTTP_201_CREATED)
 async def signup(
+    signup_data: SignupRequest,  # <--- Added this to accept the frontend payload
     token_data: dict = Depends(get_current_user_token),
     db: AsyncSession = Depends(get_db)
 ):
@@ -34,11 +41,15 @@ async def signup(
             detail="User already registered. Please log in."
         )
 
-    # 2. Create new user
+    # 2. Determine the username
+    # If frontend sends a name, use it. Otherwise, fallback to the part of the email before '@'
+    final_username = signup_data.name if signup_data.name else email.split("@")[0]
+
+    # 3. Create new user
     new_user = UserModel(
         firebase_uid=firebase_uid,
         email=email,
-        username=email.split("@")[0],
+        username=final_username, 
         role="patient",
         medical_profile={}
     )
@@ -73,4 +84,30 @@ async def login(
             detail="User profile not found. Please sign up first."
         )
     
+    return user
+
+
+@router.get("/me", response_model=PatientSchema)
+async def get_current_user_profile(
+    token_data: dict = Depends(get_current_user_token),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Get Current User Endpoint:
+    Call this on app load or page refresh.
+    It returns the user's profile based on their active Firebase token.
+    """
+    firebase_uid = token_data.get("uid")
+
+    # 1. Fetch user by their Firebase UID
+    result = await db.execute(select(UserModel).where(UserModel.firebase_uid == firebase_uid))
+    user = result.scalars().first()
+
+    # 2. If no database record is found, they need to be redirected to signup
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User profile not found. Please complete the registration process."
+        )
+
     return user

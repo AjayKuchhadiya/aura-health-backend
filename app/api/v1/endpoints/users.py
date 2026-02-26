@@ -76,7 +76,6 @@ async def onboard_doctor(
 
     new_doctor = DoctorModel(
         user_id=user.id,
-        name=onboarding_data.name,
         specialization=onboarding_data.specialization,
         license_number=onboarding_data.license_number,
         years_of_experience=onboarding_data.years_of_experience,

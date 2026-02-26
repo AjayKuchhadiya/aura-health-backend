@@ -12,7 +12,6 @@ class Doctor(Base):
     user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
     
     # Professional Details
-    name = Column(String, index=True)
     specialization = Column(String, index=True)
     license_number = Column(String, unique=True)
     years_of_experience = Column(Integer, default=0)
