@@ -4,7 +4,7 @@ import os
 
 # Initialize Firebase Admin using the key you placed in root
 if not firebase_admin._apps:
-    cred_path = "serviceAccountKey.json"
+    cred_path = os.getenv("FIREBASE_CREDENTIALS", "serviceAccountKey.json")
     if os.path.exists(cred_path):
         cred = credentials.Certificate(cred_path)
         firebase_admin.initialize_app(cred)

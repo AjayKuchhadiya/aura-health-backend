@@ -5,11 +5,16 @@ from .config import settings
 # 1. Define the shared Base class
 Base = declarative_base()
 
-# Create async engine
+# 2. Create async engine with Supabase-specific args
 engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
-    future=True
+    future=True,
+    # THIS IS THE CRITICAL FIX FOR SUPABASE:
+    connect_args={
+        "statement_cache_size": 0,
+        "prepared_statement_cache_size": 0,
+    }
 )
 
 # Create async session factory
