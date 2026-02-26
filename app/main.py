@@ -1,10 +1,25 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware  
 from app.api.v1.router import router
 
 app = FastAPI(
     title="Aura Health Backend",
     description="Backend API for Aura Health application",
     version="1.0.0"
+)
+
+origins = [
+    "http://localhost:3000",  # React/Next.js default port
+    "http://127.0.0.1:3000",
+    # Add your production frontend URL here later, e.g., "https://myapp.vercel.app"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allows all headers (Authorization, etc.)
 )
 
 # Include API v1 routes
