@@ -16,16 +16,12 @@ app = FastAPI(
     }
 )
 
-# CORS Configuration
-origins = [
-    "http://localhost:3000",  # React/Next.js default port
-    "http://127.0.0.1:3000",
-    # Add your production frontend URL here later, e.g., "https://myapp.vercel.app"
-]
+# CORS Configuration — allow all origins
+origins = ["*"]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origin_regex=r".*",
     allow_credentials=True,
     allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
     allow_headers=["*"],  # Allows all headers (Authorization, etc.)
