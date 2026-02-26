@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 from typing import Optional
+from pathlib import Path
 
 class Settings(BaseSettings):
     """Application settings from environment variables"""
@@ -26,7 +27,8 @@ class Settings(BaseSettings):
     GOOGLE_VISION_API_KEY: Optional[str] = None
     
     class Config:
-        env_file = ".env"
+        # Look for .env in the project root (parent of app directory)
+        env_file = str(Path(__file__).parent.parent.parent / ".env")
         case_sensitive = True
 
 settings = Settings()
