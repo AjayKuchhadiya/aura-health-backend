@@ -1,17 +1,24 @@
 import os
+import uuid
 from typing import Optional
-from google_adk import Agent, SessionManager, Config
+
+# Correct ADK imports
+from google.adk.agents import LlmAgent
+from google.adk.runners import Runner
+from google.adk.sessions import DatabaseSessionService
+from google.genai import types
+
 from app.core.config import settings
 
-# Ensure the ADK has access to the API key from our environment/settings
-os.environ["GEMINI_API_KEY"] = settings.GEMINI_API_KEY
+# ADK internally looks for GOOGLE_API_KEY
+os.environ["GOOGLE_API_KEY"] = settings.GEMINI_API_KEY
 
 
 class AuraAgentService:
     def __init__(self):
-        # Initialize the ADK Session Manager.
-        # By default, this can store sessions in-memory or be configured for a DB.
-        self.session_manager = SessionManager()
+        # Initialize DatabaseSessionService using your existing asyncpg Postgres URL
+        self.session_service = DatabaseSessionService(db_url=settings.DATABASE_URL)
+        self.app_name = "aura_health"
 
         # Define the system instructions to shape the agent's persona
         system_instruction = (
@@ -21,27 +28,52 @@ class AuraAgentService:
             "medical help for emergencies or serious symptoms."
         )
 
-        # Initialize the ADK Agent (using Gemini 2.5 Flash/Pro as the underlying model)
-        self.agent = Agent(
+        # Initialize the ADK Agent (Using Gemini 2.5 Flash)
+        self.agent = LlmAgent(
             model="gemini-2.5-flash",
-            system_instruction=system_instruction,
-            # tools=[...] # We can register Python functions here later (e.g., search_ambulance)
+            name="aura_assistant",
+            instruction=system_instruction,
         )
 
-    async def get_chat_response(self, message: str, session_id: str) -> str:
+        # Initialize the Runner which handles the agent execution and session linking
+        self.runner = Runner(
+            agent=self.agent,
+            app_name=self.app_name,
+            session_service=self.session_service,
+        )
+
+    async def get_chat_response(
+        self, message: str, session_id: str, user_id: str
+    ) -> str:
         """
         Retrieves the session history and generates a response from the agent.
         """
-        # Load or create the session
-        session = self.session_manager.get_or_create_session(session_id)
+        # Load or create the session using ADK's SessionService
+        session = await self.session_service.get_session(
+            app_name=self.app_name, user_id=user_id, session_id=session_id
+        )
 
-        # Run the agent with the user's message and current session context
-        response = await self.agent.arun(prompt=message, session=session)
+        if not session:
+            await self.session_service.create_session(
+                app_name=self.app_name, user_id=user_id, session_id=session_id
+            )
 
-        # Save the updated session history
-        self.session_manager.save_session(session)
+        # Prepare the user's message in ADK format
+        content = types.Content(role="user", parts=[types.Part(text=message)])
 
-        return response.text
+        final_response_text = "I'm sorry, I couldn't process your request."
+
+        # Run the agent asynchronously. It yields events until the final response is generated.
+        async for event in self.runner.run_async(
+            user_id=user_id, session_id=session_id, new_message=content
+        ):
+            # Check if this event contains the final answer from the LLM
+            if event.is_final_response():
+                if event.content and event.content.parts:
+                    final_response_text = event.content.parts[0].text
+                break
+
+        return final_response_text
 
 
 # Create a singleton instance to be used across the app

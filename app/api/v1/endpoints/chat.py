@@ -1,7 +1,7 @@
+import uuid
+from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from typing import Optional
-import uuid
 
 from app.api.deps import get_current_user_token
 from app.services.agent import aura_agent
@@ -12,7 +12,6 @@ router = APIRouter(
 )
 
 
-# Pydantic Schemas for Request/Response
 class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
@@ -32,13 +31,15 @@ async def run_chat(
     Requires a valid Firebase Bearer token.
     """
     try:
-        # If no session_id is provided, create a new one based on the user's UID and a UUID
+        # Extract user ID from Firebase token
         user_uid = token_data.get("uid", "unknown_user")
-        session_id = request.session_id or f"session_{user_uid}_{uuid.uuid4().hex[:8]}"
 
-        # Get response from the ADK Agent
+        # Use provided session_id or generate a new one
+        session_id = request.session_id or f"session_{uuid.uuid4().hex[:8]}"
+
+        # Get response from the ADK Runner
         reply_text = await aura_agent.get_chat_response(
-            message=request.message, session_id=session_id
+            message=request.message, session_id=session_id, user_id=user_uid
         )
 
         return ChatResponse(reply=reply_text, session_id=session_id)
