@@ -1,3 +1,4 @@
+import logging
 import os
 import json
 import uuid
@@ -11,12 +12,15 @@ from google.genai import types
 
 from app.core.config import settings
 
+logger = logging.getLogger(__name__)
+
 # ADK internally looks for GOOGLE_API_KEY
 os.environ["GOOGLE_API_KEY"] = settings.GEMINI_API_KEY
 
 
 class AuraAgentService:
     def __init__(self):
+        logger.info("Initialising AuraAgentService")
         # Initialize DatabaseSessionService using your existing asyncpg Postgres URL
         self.session_service = DatabaseSessionService(db_url=settings.DATABASE_URL)
         self.app_name = "aura_health"
@@ -58,6 +62,7 @@ class AuraAgentService:
             app_name=self.app_name,
             session_service=self.session_service,
         )
+        logger.info("AuraAgentService initialised with model: gemini-2.5-flash")
 
     def _format_profile(self, medical_profile: Optional[Dict[str, Any]]) -> str:
         """Serialize the user's medical profile into a readable string for the prompt."""
@@ -71,7 +76,9 @@ class AuraAgentService:
             if mh.get("allergies"):
                 parts.append(f"Allergies: {', '.join(mh['allergies'])}")
             if mh.get("chronic_conditions"):
-                parts.append(f"Chronic Conditions: {', '.join(mh['chronic_conditions'])}")
+                parts.append(
+                    f"Chronic Conditions: {', '.join(mh['chronic_conditions'])}"
+                )
             if mh.get("past_surgeries"):
                 parts.append(f"Past Surgeries: {', '.join(mh['past_surgeries'])}")
             if mh.get("family_history"):
@@ -79,8 +86,13 @@ class AuraAgentService:
             dob = medical_profile.get("date_of_birth")
             if dob:
                 parts.append(f"Date of Birth: {dob}")
-            return "; ".join(parts) if parts else "Medical profile exists but contains no detailed history."
+            return (
+                "; ".join(parts)
+                if parts
+                else "Medical profile exists but contains no detailed history."
+            )
         except Exception:
+            logger.exception("Failed to parse medical profile")
             return "Medical profile could not be parsed."
 
     async def get_chat_response(
@@ -97,6 +109,12 @@ class AuraAgentService:
         """
         formatted_profile = self._format_profile(medical_profile)
         initial_state = {"user_profile_data": formatted_profile}
+        logger.debug(
+            "get_chat_response — user_id: %s, session_id: %s, message_length: %d",
+            user_id,
+            session_id,
+            len(message),
+        )
 
         # Load or create the session using ADK's SessionService
         session = await self.session_service.get_session(
@@ -104,6 +122,9 @@ class AuraAgentService:
         )
 
         if not session:
+            logger.debug(
+                "Creating new ADK session: %s for user: %s", session_id, user_id
+            )
             session = await self.session_service.create_session(
                 app_name=self.app_name,
                 user_id=user_id,
@@ -111,6 +132,9 @@ class AuraAgentService:
                 state=initial_state,
             )
         else:
+            logger.debug(
+                "Resuming existing ADK session: %s for user: %s", session_id, user_id
+            )
             # Refresh the profile in state on every request so updates are picked up
             session.state["user_profile_data"] = formatted_profile
             await self.session_service.update_session(session)
@@ -128,10 +152,17 @@ class AuraAgentService:
             if event.is_final_response():
                 if event.content and event.content.parts:
                     final_response_text = event.content.parts[0].text
+                    logger.debug(
+                        "Final response received — session_id: %s, length: %d",
+                        session_id,
+                        len(final_response_text),
+                    )
                 break
 
         return final_response_text
 
 
 # Create a singleton instance to be used across the app
+logger.info("Creating AuraAgentService singleton")
 aura_agent = AuraAgentService()
+logger.info("AuraAgentService singleton created successfully")
