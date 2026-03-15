@@ -21,8 +21,20 @@ os.environ["GOOGLE_API_KEY"] = settings.GEMINI_API_KEY
 class AuraAgentService:
     def __init__(self):
         logger.info("Initialising AuraAgentService")
-        # Initialize DatabaseSessionService using your existing asyncpg Postgres URL
-        self.session_service = DatabaseSessionService(db_url=settings.DATABASE_URL)
+        # Build the ADK session DB URL with prepared statement caching disabled.
+        # This is required when the database sits behind a connection pooler
+        # (e.g. PgBouncer / Supabase / Neon) running in transaction or statement
+        # pool mode, which does not support asyncpg prepared statements.
+        adk_db_url = settings.DATABASE_URL
+        # Ensure the scheme is asyncpg-based (ADK requires async dialect)
+        if adk_db_url.startswith("postgresql://"):
+            adk_db_url = adk_db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        elif adk_db_url.startswith("postgres://"):
+            adk_db_url = adk_db_url.replace("postgres://", "postgresql+asyncpg://", 1)
+        # Append prepared_statement_cache_size=0 to disable asyncpg statement caching
+        separator = "&" if "?" in adk_db_url else "?"
+        adk_db_url = f"{adk_db_url}{separator}prepared_statement_cache_size=0"
+        self.session_service = DatabaseSessionService(db_url=adk_db_url)
         self.app_name = "aura_health"
 
         # Strict Health Navigator persona with guardrails.
@@ -137,7 +149,6 @@ class AuraAgentService:
             )
             # Refresh the profile in state on every request so updates are picked up
             session.state["user_profile_data"] = formatted_profile
-            await self.session_service.update_session(session)
 
         # Prepare the user's message in ADK format
         content = types.Content(role="user", parts=[types.Part(text=message)])
