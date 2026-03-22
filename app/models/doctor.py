@@ -24,6 +24,11 @@ class Doctor(Base):
     bio = Column(String)
     consultation_fee = Column(Float, default=0.0)
     
+    # Physical location (for online-platform doctors — city/country used for context matching)
+    city = Column(String, nullable=True)
+    state = Column(String, nullable=True)
+    country = Column(String, nullable=True)
+
     # Availability & Stats
     availability = Column(JSONB, default={})
     rating = Column(Float, default=0.0)

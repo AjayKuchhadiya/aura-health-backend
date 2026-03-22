@@ -19,6 +19,11 @@ class DoctorOnboarding(BaseModel):
     consultation_fee: Optional[float] = 0.0
     availability: Optional[Dict[str, Any]] = {"days": [], "hours": ""}
     
+    # Physical location (city/country shown to users for context — doctor is online-only)
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+
     # Accept these fields if the frontend sends them, but make them optional
     is_verified: Optional[bool] = False
     is_available: Optional[bool] = True

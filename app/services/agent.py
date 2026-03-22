@@ -11,6 +11,7 @@ from google.adk.sessions import DatabaseSessionService
 from google.genai import types
 
 from app.core.config import settings
+from app.services.agent_tools import AGENT_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,21 @@ class AuraAgentService:
         system_instruction = (
             "You are Aura, a Health Navigator AI. "
             "You have access to the user's medical profile: {user_profile_data}. "
+            "The user's current location is: {user_location}. "
+            "Use this location to provide geographically relevant recommendations — "
+            "such as mentioning nearby doctors, local emergency numbers, and whether "
+            "an Aura platform doctor is based in the user's city or country. "
+            "If no location is available, proceed without it. "
+            "\n\n"
+            "TOOLS AVAILABLE TO YOU:\n"
+            "You have the following tools you can actively call to help the user:\n"
+            "- search_doctors(specialty, is_available): Search for doctors by specialty on the Aura platform.\n"
+            "- get_doctor_details(doctor_id): Get full profile details for a specific doctor.\n"
+            "- find_nearest_ambulance(latitude, longitude): Locate the nearest ambulance using GPS coordinates.\n"
+            "- request_ambulance(location_description): Dispatch an ambulance to a described location.\n"
+            "- assess_emergency_level(symptoms): Triage reported symptoms to determine urgency level.\n"
+            "Always proactively use these tools when the user's request can be fulfilled by them. "
+            "Do not just describe what you could do — actually call the tool and present the results.\n"
             "\n\n"
             "STRICT RULES YOU MUST ALWAYS FOLLOW:\n"
             "1. You MUST NOT provide medical diagnoses or prescribe treatments under any circumstances.\n"
@@ -55,17 +71,19 @@ class AuraAgentService:
             "This information is not a diagnosis. Please consult a qualified healthcare provider for "
             "medical advice.'\n"
             "5. If the user describes a life-threatening emergency (e.g., chest pain, difficulty breathing, "
-            "loss of consciousness), immediately instruct them to call emergency services (911 or local "
-            "equivalent) and offer to request an ambulance through the Aura platform.\n"
+            "loss of consciousness), IMMEDIATELY call assess_emergency_level(symptoms) and then "
+            "offer to call find_nearest_ambulance or request_ambulance. Always tell them to also "
+            "call emergency services (911 or local equivalent).\n"
             "6. Use the user's medical profile (allergies, chronic conditions, blood type, etc.) to provide "
             "personalised, contextually relevant guidance — but never to diagnose."
         )
 
-        # Initialize the ADK Agent (Using Gemini 2.5 Flash)
+        # Initialize the ADK Agent (Using Gemini 2.5 Flash) with function-calling tools
         self.agent = LlmAgent(
             model="gemini-2.5-flash",
             name="aura_assistant",
             instruction=system_instruction,
+            tools=AGENT_TOOLS,
         )
 
         # Initialize the Runner which handles the agent execution and session linking
@@ -107,20 +125,45 @@ class AuraAgentService:
             logger.exception("Failed to parse medical profile")
             return "Medical profile could not be parsed."
 
+    def _format_location(self, location: Optional[Dict[str, Any]]) -> str:
+        """Serialize the user's location into a readable string for the prompt."""
+        if not location:
+            return "Location not provided."
+        parts = []
+        city = location.get("city")
+        country = location.get("country")
+        lat = location.get("latitude")
+        lon = location.get("longitude")
+        tz = location.get("timezone")
+        if city:
+            parts.append(city)
+        if country:
+            parts.append(country)
+        if lat is not None and lon is not None:
+            parts.append(f"Coordinates: ({lat}, {lon})")
+        if tz:
+            parts.append(f"Timezone: {tz}")
+        return ", ".join(parts) if parts else "Location not provided."
+
     async def get_chat_response(
         self,
         message: str,
         session_id: str,
         user_id: str,
         medical_profile: Optional[Dict[str, Any]] = None,
+        location: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Retrieves the session history and generates a response from the agent.
-        Injects the user's medical profile into the ADK session state so the
-        system prompt placeholder {user_profile_data} is resolved correctly.
+        Injects the user's medical profile and location into the ADK session state
+        so the system prompt placeholders are resolved correctly.
         """
         formatted_profile = self._format_profile(medical_profile)
-        initial_state = {"user_profile_data": formatted_profile}
+        formatted_location = self._format_location(location)
+        initial_state = {
+            "user_profile_data": formatted_profile,
+            "user_location": formatted_location,
+        }
         logger.debug(
             "get_chat_response — user_id: %s, session_id: %s, message_length: %d",
             user_id,
@@ -147,8 +190,9 @@ class AuraAgentService:
             logger.debug(
                 "Resuming existing ADK session: %s for user: %s", session_id, user_id
             )
-            # Refresh the profile in state on every request so updates are picked up
+            # Refresh profile and location on every request so updates are picked up
             session.state["user_profile_data"] = formatted_profile
+            session.state["user_location"] = formatted_location
 
         # Prepare the user's message in ADK format
         content = types.Content(role="user", parts=[types.Part(text=message)])

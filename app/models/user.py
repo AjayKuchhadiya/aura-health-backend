@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, DateTime, Boolean
+from sqlalchemy import Column, String, Integer, DateTime, Boolean, Float
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -18,6 +18,14 @@ class User(Base):
 
     # Stores the patient's medical history, allergies, etc.
     medical_profile = Column(JSONB, default={})
+
+    # Last known location — updated on every chat request that includes location
+    last_known_latitude = Column(Float, nullable=True)
+    last_known_longitude = Column(Float, nullable=True)
+    last_known_city = Column(String, nullable=True)
+    last_known_country = Column(String, nullable=True)
+    timezone = Column(String, nullable=True)  # e.g. 'America/Los_Angeles'
+    location_updated_at = Column(DateTime, nullable=True)
 
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
