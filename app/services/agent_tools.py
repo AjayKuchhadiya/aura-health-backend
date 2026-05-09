@@ -26,6 +26,11 @@ from app.core.database import AsyncSessionLocal
 from app.models.doctor import Doctor as DoctorModel
 from app.models.user import User as UserModel
 from app.services.ambulance import AmbulanceSearchService
+from app.services.osm import (
+    get_emergency_number,
+    search_nearby_emergency_services,
+    search_nearby_healthcare,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +103,11 @@ async def search_doctors(
                     "bio": doctor.bio or "",
                     "is_available": doctor.is_available,
                     "is_verified": doctor.is_verified,
+                    # Location context — lets the agent say "Dr. X is based in your city"
+                    "city": doctor.city,
+                    "state": doctor.state,
+                    "country": doctor.country,
+                    "consultation_type": "online",
                 }
             )
 
@@ -163,39 +173,155 @@ async def get_doctor_details(doctor_id: int) -> dict:
         return {"error": f"Failed to retrieve doctor details: {exc}"}
 
 
+async def search_nearby_doctors(
+    latitude: float,
+    longitude: float,
+    specialty: str = "",
+    radius_km: float = 10.0,
+) -> dict:
+    """
+    Search for in-person doctors, clinics, and hospitals near the user's
+    current GPS location using OpenStreetMap data.
+
+    Use this tool when the user wants to physically visit a doctor or needs
+    to find a nearby clinic or hospital.  Always call this alongside
+    search_doctors() so the user gets both in-person and online options.
+
+    If no results are found within the given radius, the OSM layer will
+    automatically retry with a 1.5× larger radius before returning empty.
+
+    Args:
+        latitude:   User's current latitude in decimal degrees.
+        longitude:  User's current longitude in decimal degrees.
+        specialty:  Optional medical specialty to hint at (e.g. 'cardiologist',
+                    'dentist', 'dermatologist').  Used to contextualise the
+                    results — OSM data may not always carry specialty tags.
+        radius_km:  Search radius in kilometres (default 10 km, max sensible
+                    value is 20 km for urban areas).
+
+    Returns:
+        A dict with a 'facilities' list. Each entry contains name, type,
+        address, phone, website, opening_hours, distance_km, and
+        booking_contact (phone → website → address fallback chain).
+        Returns an 'error' key on failure.
+    """
+    logger.info(
+        "Tool: search_nearby_doctors — lat=%s, lon=%s, specialty='%s', radius=%skm",
+        latitude,
+        longitude,
+        specialty,
+        radius_km,
+    )
+    try:
+        radius_m = int(min(radius_km, 20) * 1000)  # cap at 20 km
+        facilities = await search_nearby_healthcare(
+            latitude=latitude,
+            longitude=longitude,
+            radius_m=radius_m,
+            limit=8,
+            specialty=specialty,
+        )
+
+        if not facilities:
+            return {
+                "facilities": [],
+                "message": (
+                    f"No healthcare facilities found within {radius_km} km of your location "
+                    "on OpenStreetMap. Try increasing the radius or search by address."
+                ),
+            }
+
+        # Surface specialty hint to help the agent contextualise results
+        specialty_note = (
+            f"Results are all healthcare facilities within {radius_km} km. "
+            f"Filter or highlight those relevant to '{specialty}' based on their type/specialty tags."
+            if specialty
+            else f"All healthcare facilities within {radius_km} km of your location."
+        )
+
+        return {
+            "facilities": facilities,
+            "total": len(facilities),
+            "note": specialty_note,
+        }
+
+    except Exception as exc:
+        logger.exception("search_nearby_doctors tool failed")
+        return {"error": f"Failed to search nearby doctors: {exc}"}
+
+
 # ---------------------------------------------------------------------------
 # Ambulance tools
 # ---------------------------------------------------------------------------
 
 
-async def find_nearest_ambulance(latitude: float, longitude: float) -> dict:
+async def find_nearest_ambulance(
+    latitude: float,
+    longitude: float,
+    country_code: str = "",
+) -> dict:
     """
-    Locate the nearest available ambulance given the user's GPS coordinates.
+    Locate the nearest available ambulance or emergency medical service given
+    the user's GPS coordinates.  Searches OpenStreetMap for real ambulance
+    stations and hospitals near the user, then falls back to the internal
+    platform fleet if OSM returns no results.
 
     Use this tool only when the user is experiencing or witnessing a medical
-    emergency and has shared their location coordinates.  Always remind the
-    user to also call local emergency services (e.g. 911).
+    emergency and has shared their location coordinates.  Always include the
+    local emergency number in your response.
 
     Args:
-        latitude:  User's current latitude in decimal degrees (e.g. 37.7749).
-        longitude: User's current longitude in decimal degrees (e.g. -122.4194).
+        latitude:     User's current latitude in decimal degrees (e.g. 37.7749).
+        longitude:    User's current longitude in decimal degrees (e.g. -122.4194).
+        country_code: ISO 3166-1 alpha-2 country code (e.g. 'US', 'GB', 'GH')
+                      used to look up the correct local emergency number.
+                      Leave blank if unknown.
 
     Returns:
-        A dict with 'ambulance' details including estimated_arrival_minutes,
-        unit_id, driver_name, and contact_number. Returns an 'error' key on
-        failure.
+        A dict with 'nearest_services' (list of nearby ambulance/hospital
+        facilities from OSM, each with name, address, phone, distance_km),
+        'emergency_number' (the local emergency dial number), and a
+        'platform_unit' if available from the internal fleet.  Returns an
+        'error' key on complete failure.
     """
-    logger.info("Tool: find_nearest_ambulance — lat=%s, lon=%s", latitude, longitude)
+    logger.info(
+        "Tool: find_nearest_ambulance — lat=%s, lon=%s, country=%s",
+        latitude,
+        longitude,
+        country_code,
+    )
     try:
-        result = await AmbulanceSearchService.find_nearest_ambulance(
+        emergency_number = get_emergency_number(country_code or None)
+
+        # Primary: query OSM for real ambulance stations / hospitals nearby
+        osm_results = await search_nearby_emergency_services(
+            latitude=latitude,
+            longitude=longitude,
+            radius_m=10000,
+            limit=3,
+        )
+
+        # Fallback: internal stub fleet (always available as a secondary source)
+        platform_unit = await AmbulanceSearchService.find_nearest_ambulance(
             latitude, longitude
         )
-        if result is None:
+
+        if not osm_results and platform_unit is None:
             return {
-                "error": "No ambulances are currently available in your area. "
-                "Please call emergency services immediately (911 or local equivalent)."
+                "error": "No emergency services found near your location. "
+                f"CALL {emergency_number} IMMEDIATELY.",
+                "emergency_number": emergency_number,
             }
-        return result
+
+        return {
+            "nearest_services": osm_results,  # real OSM data
+            "platform_unit": platform_unit,  # internal fleet fallback
+            "emergency_number": emergency_number,
+            "critical_note": (
+                f"⚠️ CALL {emergency_number} (local emergency services) IMMEDIATELY "
+                "in addition to using any platform dispatch."
+            ),
+        }
 
     except Exception as exc:
         logger.exception("find_nearest_ambulance tool failed")
@@ -362,6 +488,7 @@ async def assess_emergency_level(symptoms: str) -> dict:
 
 AGENT_TOOLS = [
     search_doctors,
+    search_nearby_doctors,
     get_doctor_details,
     find_nearest_ambulance,
     request_ambulance,

@@ -16,6 +16,11 @@ from app.services.agent_tools import AGENT_TOOLS
 logger = logging.getLogger(__name__)
 
 # ADK internally looks for GOOGLE_API_KEY
+if not settings.GEMINI_API_KEY:
+    raise ValueError(
+        "GEMINI_API_KEY environment variable is not set. "
+        "The Aura AI agent cannot start without it."
+    )
 os.environ["GOOGLE_API_KEY"] = settings.GEMINI_API_KEY
 
 
@@ -41,7 +46,7 @@ class AuraAgentService:
         # Strict Health Navigator persona with guardrails.
         # The {user_profile_data} placeholder is resolved from ADK session state
         # so each user's medical profile is injected automatically.
-        system_instruction = (
+        system_instruction = """
             "You are Aura, a Health Navigator AI. "
             "You have access to the user's medical profile: {user_profile_data}. "
             "The user's current location is: {user_location}. "
@@ -52,13 +57,25 @@ class AuraAgentService:
             "\n\n"
             "TOOLS AVAILABLE TO YOU:\n"
             "You have the following tools you can actively call to help the user:\n"
-            "- search_doctors(specialty, is_available): Search for doctors by specialty on the Aura platform.\n"
-            "- get_doctor_details(doctor_id): Get full profile details for a specific doctor.\n"
-            "- find_nearest_ambulance(latitude, longitude): Locate the nearest ambulance using GPS coordinates.\n"
-            "- request_ambulance(location_description): Dispatch an ambulance to a described location.\n"
+            "- search_doctors(specialty, is_available): Search the Aura platform for online doctors by specialty. "
+            "Returns doctor's city and country so you can note if they are based near the user.\n"
+            "- search_nearby_doctors(latitude, longitude, specialty, radius_km): Search OpenStreetMap for "
+            "real in-person clinics, doctors, and hospitals physically near the user's coordinates.\n"
+            "- get_doctor_details(doctor_id): Get full profile details for a specific Aura platform doctor.\n"
+            "- find_nearest_ambulance(latitude, longitude, country_code): Locate real nearby ambulance "
+            "stations and hospitals via OpenStreetMap, plus the local emergency phone number.\n"
+            "- request_ambulance(location_description): Dispatch a platform ambulance to a described location.\n"
             "- assess_emergency_level(symptoms): Triage reported symptoms to determine urgency level.\n"
+            "\n"
+            "DOCTOR SEARCH ROUTING RULE — always follow this when a user asks about finding a doctor:\n"
+            "1. ALWAYS call search_nearby_doctors() to surface in-person options near the user.\n"
+            "2. ALWAYS call search_doctors() to check if Aura platform has a matching online doctor.\n"
+            "3. Present both results together: in-person options first, then Aura platform doctors.\n"
+            "4. If a platform doctor's city/country matches the user's location, highlight this: "
+            "'Dr. X is also available online through Aura and is based in your city.'\n"
+            "5. For in-person results, always surface: name, distance, address, and phone (say 'Call to book: <number>').\n"
             "Always proactively use these tools when the user's request can be fulfilled by them. "
-            "Do not just describe what you could do — actually call the tool and present the results.\n"
+            "Do not just describe what you could do — actually call the tool and present the results.\n",
             "\n\n"
             "STRICT RULES YOU MUST ALWAYS FOLLOW:\n"
             "1. You MUST NOT provide medical diagnoses or prescribe treatments under any circumstances.\n"
@@ -76,7 +93,7 @@ class AuraAgentService:
             "call emergency services (911 or local equivalent).\n"
             "6. Use the user's medical profile (allergies, chronic conditions, blood type, etc.) to provide "
             "personalised, contextually relevant guidance — but never to diagnose."
-        )
+        """
 
         # Initialize the ADK Agent (Using Gemini 2.5 Flash) with function-calling tools
         self.agent = LlmAgent(

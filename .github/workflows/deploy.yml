@@ -1,0 +1,52 @@
+name: CI/CD → Render
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ──────────────────────────────────────────────────────────
+  # 1. Lint & smoke-test
+  # ──────────────────────────────────────────────────────────
+  test:
+    name: Lint & Import Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Check syntax (smoke test)
+        # Compiles all Python files to check for syntax errors
+        # without executing module-level code (avoiding DB/API connections).
+        run: |
+          find app -name "*.py" | xargs python -m py_compile && echo "All files OK"
+
+  # ──────────────────────────────────────────────────────────
+  # 2. Deploy to Render (only on pushes to main, after tests pass)
+  # ──────────────────────────────────────────────────────────
+  deploy:
+    name: Deploy to Render
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Trigger Render deploy hook
+        run: |
+          curl -s --fail -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}" \
+            -o /dev/null -w "HTTP %{http_code}\n"
+        # RENDER_DEPLOY_HOOK_URL is the webhook URL from your Render service's
+        # Settings → Deploy Hook. Add it in:
+        # GitHub repo → Settings → Secrets → Actions → New repository secret

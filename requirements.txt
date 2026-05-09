@@ -17,3 +17,4 @@ pydantic[email]
 firebase-admin
 psycopg2-binary
 google-adk
+httpx

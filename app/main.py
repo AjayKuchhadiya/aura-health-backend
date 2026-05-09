@@ -1,4 +1,5 @@
 import logging
+import subprocess
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -42,6 +43,20 @@ logger.info("API v1 router registered at /api/v1")
 
 @app.on_event("startup")
 async def on_startup():
+    logger.info("Running database migrations...")
+    try:
+        result = subprocess.run(
+            ["alembic", "upgrade", "head"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if result.returncode == 0:
+            logger.info("Migrations completed successfully")
+        else:
+            logger.error("Migration failed:\n%s", result.stderr)
+    except Exception as e:
+        logger.error("Failed to run migrations: %s", e)
     logger.info("Aura Health Backend is starting up")
 
 

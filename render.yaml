@@ -1,0 +1,35 @@
+# render.yaml — Infrastructure-as-Code for Render
+# Docs: https://render.com/docs/yaml-spec
+#
+# This file lets you configure your Render service from code.
+# On first deploy you can also use the Render dashboard manually —
+# this file is here so the configuration is version-controlled.
+
+services:
+  - type: web
+    name: aura-health-backend
+    runtime: docker          # Uses the Dockerfile in the repo root
+    dockerfilePath: ./Dockerfile
+    region: oregon           # Change to: frankfurt | singapore | ohio
+    plan: free               # Upgrade to "starter" ($7/mo) for no spin-down
+    branch: main
+
+    # Health-check so Render knows when the container is ready
+    healthCheckPath: /health
+
+    # All sensitive values must be added in Render dashboard under
+    # Environment → Environment Variables (or use Render Secrets).
+    # The entries below are non-secret defaults only.
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11"
+      - key: ALGORITHM
+        value: HS256
+      - key: ACCESS_TOKEN_EXPIRE_MINUTES
+        value: "30"
+      # ── Add these in Render dashboard as Secret Files / Env Vars ──
+      # DATABASE_URL          postgresql+asyncpg://...
+      # SECRET_KEY            <random 32-char string>
+      # GEMINI_API_KEY        <your Gemini API key>
+      # FIREBASE_CREDENTIALS  <contents of serviceAccountKey.json as a JSON string>
+      # GOOGLE_VISION_API_KEY (optional)
