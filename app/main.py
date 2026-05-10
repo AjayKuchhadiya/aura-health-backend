@@ -3,7 +3,9 @@ import subprocess
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from app.api.v1.router import router
+from app.core.database import get_db
 from app.core.logging_config import setup_logging
 
 # These imports force SQLAlchemy to "see" your models before the app starts.
@@ -70,6 +72,19 @@ async def health_check():
     """Health check endpoint"""
     logger.debug("Health check requested")
     return {"status": "healthy"}
+
+
+@app.get("/health/db")
+async def db_health_check():
+    """
+    Lightweight DB keep-alive endpoint.
+    Runs a simple SELECT 1 to prevent Supabase from pausing the instance.
+    Safe to call unauthenticated — no data is read or written.
+    """
+    async for db in get_db():
+        await db.execute(text("SELECT 1"))
+    logger.debug("DB keep-alive ping successful")
+    return {"status": "db_alive"}
 
 
 if __name__ == "__main__":
