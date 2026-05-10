@@ -3,9 +3,9 @@
 A production-ready healthcare platform API built with **FastAPI**, **PostgreSQL**, and **Google Gemini AI**. Powers an intelligent health navigator that connects patients with doctors, provides AI-assisted medical guidance, and locates nearby clinics and ambulance services.
 
 
-**Live UI:** `https://aura-health-frontend-five.vercel.app`  
-**Live API:** `https://aura-health-backend-2xhl.onrender.com/health`  
-**Docs (Swagger):** `https://aura-health-backend-2xhl.onrender.com/docs`
+**Live UI:** [https://aura-health-frontend-five.vercel.app](https://aura-health-frontend-five.vercel.app)  
+**Live API:** [https://aura-health-backend-2xhl.onrender.com/health](https://aura-health-backend-2xhl.onrender.com/health)  
+**Docs (Swagger):** [https://aura-health-backend-2xhl.onrender.com/docs](https://aura-health-backend-2xhl.onrender.com/docs)
 
 ---
 
@@ -83,7 +83,6 @@ See [.env.example](.env.example) for all required and optional variables.
 | `GEMINI_API_KEY` | Yes | Google Gemini API key for the AI agent |
 | `FIREBASE_CREDENTIALS` | Yes | Firebase service account JSON (as a string) |
 | `GOOGLE_VISION_API_KEY` | No | Google Cloud Vision for OCR |
-| `AWS_ACCESS_KEY_ID` | No | S3 / R2 file storage |
 
 ---
 
