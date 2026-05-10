@@ -2,10 +2,10 @@
 
 A production-ready healthcare platform API built with **FastAPI**, **PostgreSQL**, and **Google Gemini AI**. Powers an intelligent health navigator that connects patients with doctors, provides AI-assisted medical guidance, and locates nearby clinics and ambulance services.
 
-[![CI/CD](https://github.com/YOUR_GITHUB_USERNAME/aura-health-backend/actions/workflows/deploy.yml/badge.svg)](https://github.com/YOUR_GITHUB_USERNAME/aura-health-backend/actions/workflows/deploy.yml)
 
-**Live API:** `https://aura-health-backend.onrender.com`  
-**Docs (Swagger):** `https://aura-health-backend.onrender.com/docs`
+**Live UI:** `https://aura-health-frontend-five.vercel.app`  
+**Live API:** `https://aura-health-backend-2xhl.onrender.com/health`  
+**Docs (Swagger):** `https://aura-health-backend-2xhl.onrender.com/docs`
 
 ---
 
@@ -29,9 +29,9 @@ A production-ready healthcare platform API built with **FastAPI**, **PostgreSQL*
 - **Migrations:** Alembic
 - **Auth:** Firebase Admin SDK
 - **AI Agent:** Google ADK + Gemini
-- **Geo:** OpenStreetMap Overpass API
-- **OCR:** Google Cloud Vision
-- **Storage:** AWS S3 / Cloudflare R2
+- **Geo:** TBD
+- **OCR:** TBD
+- **Storage:** TBD
 - **Deployment:** Render (Docker) with GitHub Actions CI/CD
 
 ---
