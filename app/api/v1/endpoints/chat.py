@@ -42,16 +42,17 @@ class ChatResponse(BaseModel):
 
 async def _fetch_medical_profile(
     db: AsyncSession, firebase_uid: str
-) -> Optional[Dict[str, Any]]:
-    """Fetch the user's medical_profile JSONB column from the database."""
+) -> tuple[Optional[Dict[str, Any]], Optional[int]]:
+    """Fetch the user's medical_profile JSONB column and DB id from the database."""
     logger.debug("Fetching medical profile for uid: %s", firebase_uid)
     result = await db.execute(
-        select(User.medical_profile).where(User.firebase_uid == firebase_uid)
+        select(User.medical_profile, User.id).where(User.firebase_uid == firebase_uid)
     )
-    row = result.scalar_one_or_none()
+    row = result.first()
     if row is None:
-        logger.debug("No medical profile found for uid: %s", firebase_uid)
-    return row  # returns the dict stored in JSONB, or None
+        logger.debug("No user found for uid: %s", firebase_uid)
+        return None, None
+    return row[0], row[1]  # (medical_profile dict, db id)
 
 
 @router.post("/run", response_model=ChatResponse)
@@ -76,8 +77,8 @@ async def run_chat(
             len(request.message),
         )
 
-        # Fetch the user's medical profile (Digital Twin) from the DB
-        medical_profile = await _fetch_medical_profile(db, firebase_uid=user_uid)
+        # Fetch the user's medical profile (Digital Twin) and DB id from the DB
+        medical_profile, user_db_id = await _fetch_medical_profile(db, firebase_uid=user_uid)
 
         # Persist user's location if provided
         location_dict: Optional[Dict[str, Any]] = None
@@ -103,11 +104,12 @@ async def run_chat(
         if not request.session_id:
             logger.debug("Generated new session_id: %s", session_id)
 
-        # Get response from the ADK Runner, passing the user's profile and location for context
+        # Get response from the ADK Runner, passing the user's profile, DB id, and location
         reply_text = await aura_agent.get_chat_response(
             message=request.message,
             session_id=session_id,
             user_id=user_uid,
+            user_db_id=user_db_id,
             medical_profile=medical_profile,
             location=location_dict,
         )

@@ -33,3 +33,4 @@ class User(Base):
 
     # Relationships
     doctor_profile = relationship("Doctor", back_populates="user", uselist=False)
+    medications = relationship("Medication", back_populates="user", cascade="all, delete-orphan")

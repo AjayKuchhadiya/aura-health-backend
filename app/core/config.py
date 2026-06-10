@@ -21,16 +21,16 @@ class Settings(BaseSettings):
     # Firebase
     FIREBASE_CREDENTIALS: Optional[str] = None
 
-    # AWS/R2 Configuration
-    AWS_ACCESS_KEY_ID: Optional[str] = None
-    AWS_SECRET_ACCESS_KEY: Optional[str] = None
-    AWS_S3_BUCKET_NAME: Optional[str] = None
-    AWS_REGION: str = "us-east-1"
-
     # External Services
-    GOOGLE_VISION_API_KEY: Optional[str] = None
-
     GEMINI_API_KEY: Optional[str] = None
+
+    # Supabase (storage + optional direct queries)
+    SUPABASE_URL: Optional[str] = None   # e.g. https://xxxx.supabase.co
+    SUPABASE_KEY: Optional[str] = None   # service-role key (kept server-side only)
+
+    # Google Calendar MCP — remote SSE server URL
+    # Point this at the deployed calendar-mcp service (e.g. on Render)
+    CALENDAR_MCP_SSE_URL: str = "https://your-calendar-mcp.onrender.com/sse"
 
     # This configuration allows extra fields in .env without crashing
     model_config = SettingsConfigDict(

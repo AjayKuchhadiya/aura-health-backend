@@ -14,6 +14,7 @@ from app.core.database import Base
 from app.core.config import settings
 from app.models.user import User
 from app.models.doctor import Doctor
+from app.models.medication import Medication
 
 config = context.config
 
@@ -29,9 +30,19 @@ def get_url():
 def include_object(object, name, type_, reflected, compare_to):
     """
     Helper to tell Alembic to ignore certain tables.
-    We want to ignore 'spatial_ref_sys' because it's managed by PostGIS, not us.
+    - spatial_ref_sys: managed by PostGIS.
+    - ADK session tables: managed by google-adk's DatabaseSessionService.
     """
-    if type_ == "table" and name == "spatial_ref_sys":
+    _IGNORE_TABLES = {
+        "spatial_ref_sys",
+        # google-adk DatabaseSessionService tables
+        "sessions",
+        "events",
+        "app_states",
+        "user_states",
+        "adk_internal_metadata",
+    }
+    if type_ == "table" and name in _IGNORE_TABLES:
         return False
     return True
 

@@ -5,15 +5,12 @@ alembic
 pydantic
 pydantic-settings
 python-dotenv
-boto3
-google-cloud-vision
 aiofiles
 asyncpg
 python-jose[cryptography]
 passlib[bcrypt]
 supabase
 pydantic[email]
-
 firebase-admin
 psycopg2-binary
 google-adk
