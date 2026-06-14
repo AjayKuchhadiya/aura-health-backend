@@ -12,6 +12,8 @@ from app.core.logging_config import setup_logging
 # Without this, you get "KeyError: Doctor" because the model isn't registered.
 from app.models.user import User
 from app.models.doctor import Doctor
+from app.models.medication import Medication
+from app.models.user_calendar_token import UserCalendarToken
 
 # Initialise logging before anything else
 setup_logging()
@@ -64,6 +66,8 @@ async def on_startup():
 
 @app.on_event("shutdown")
 async def on_shutdown():
+    from app.services.agent import aura_agent
+    await aura_agent.close()
     logger.info("Aura Health Backend is shutting down")
 
 

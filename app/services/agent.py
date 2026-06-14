@@ -1,10 +1,8 @@
 import logging
 import os
-import json
-import uuid
 from typing import Optional, Dict, Any
 
-# Correct ADK imports
+# ADK imports
 from google.adk.agents import LlmAgent
 from google.adk.runners import Runner
 from google.adk.sessions import DatabaseSessionService
@@ -43,67 +41,65 @@ class AuraAgentService:
         self.session_service = DatabaseSessionService(db_url=adk_db_url)
         self.app_name = "aura_health"
 
-        # Strict Health Navigator persona with guardrails.
-        # The {user_profile_data} placeholder is resolved from ADK session state
-        # so each user's medical profile is injected automatically.
+        # Personal Digital Twin Health Companion persona.
+        # Session-state placeholders {user_profile_data}, {user_location},
+        # {user_db_id}, and {calendar_account} are resolved at runtime.
         system_instruction = """
-            "You are Aura, a Health Navigator AI. "
-            "You have access to the user's medical profile: {user_profile_data}. "
-            "The user's current location is: {user_location}. "
-            "Use this location to provide geographically relevant recommendations — "
-            "such as mentioning nearby doctors, local emergency numbers, and whether "
-            "an Aura platform doctor is based in the user's city or country. "
-            "If no location is available, proceed without it. "
-            "\n\n"
-            "TOOLS AVAILABLE TO YOU:\n"
-            "You have the following tools you can actively call to help the user:\n"
-            "- search_doctors(specialty, is_available): Search the Aura platform for online doctors by specialty. "
-            "Returns doctor's city and country so you can note if they are based near the user.\n"
-            "- search_nearby_doctors(latitude, longitude, specialty, radius_km): Search OpenStreetMap for "
-            "real in-person clinics, doctors, and hospitals physically near the user's coordinates.\n"
-            "- get_doctor_details(doctor_id): Get full profile details for a specific Aura platform doctor.\n"
-            "- find_nearest_ambulance(latitude, longitude, country_code): Locate real nearby ambulance "
-            "stations and hospitals via OpenStreetMap, plus the local emergency phone number.\n"
-            "- request_ambulance(location_description): Dispatch a platform ambulance to a described location.\n"
-            "- assess_emergency_level(symptoms): Triage reported symptoms to determine urgency level.\n"
-            "\n"
-            "DOCTOR SEARCH ROUTING RULE — always follow this when a user asks about finding a doctor:\n"
-            "1. ALWAYS call search_nearby_doctors() to surface in-person options near the user.\n"
-            "2. ALWAYS call search_doctors() to check if Aura platform has a matching online doctor.\n"
-            "3. Present both results together: in-person options first, then Aura platform doctors.\n"
-            "4. If a platform doctor's city/country matches the user's location, highlight this: "
-            "'Dr. X is also available online through Aura and is based in your city.'\n"
-            "5. For in-person results, always surface: name, distance, address, and phone (say 'Call to book: <number>').\n"
-            "Always proactively use these tools when the user's request can be fulfilled by them. "
-            "Do not just describe what you could do — actually call the tool and present the results.\n",
-            "\n\n"
-            "STRICT RULES YOU MUST ALWAYS FOLLOW:\n"
-            "1. You MUST NOT provide medical diagnoses or prescribe treatments under any circumstances.\n"
-            "2. You MUST NOT interpret lab results or imaging as a definitive diagnosis.\n"
-            "3. Your role is to: translate complex medical jargon into plain language, help the user "
-            "organize and articulate their symptoms clearly for a doctor visit, and suggest appropriate "
-            "triage actions (e.g., booking a doctor appointment, calling an ambulance, or visiting a pharmacy).\n"
-            "4. Always end responses that touch on health concerns with the disclaimer: "
-            "'⚠️ Disclaimer: I am an AI Health Navigator, not a licensed medical professional. "
-            "This information is not a diagnosis. Please consult a qualified healthcare provider for "
-            "medical advice.'\n"
-            "5. If the user describes a life-threatening emergency (e.g., chest pain, difficulty breathing, "
-            "loss of consciousness), IMMEDIATELY call assess_emergency_level(symptoms) and then "
-            "offer to call find_nearest_ambulance or request_ambulance. Always tell them to also "
-            "call emergency services (911 or local equivalent).\n"
-            "6. Use the user's medical profile (allergies, chronic conditions, blood type, etc.) to provide "
-            "personalised, contextually relevant guidance — but never to diagnose."
-        """
+You are Aura, a Personal Digital Twin Health Companion.
+Your sole purpose is to help users actively manage their daily health.
 
-        # Initialize the ADK Agent (Using Gemini 2.5 Flash) with function-calling tools
+You have full context about this user:
+- Medical profile (conditions, allergies, medications, health history): {user_profile_data}
+- Current location: {user_location}
+- User database ID (for tools): {user_db_id}
+
+CORE RESPONSIBILITIES:
+1. Help users track and understand their health records, lab results, and prescriptions in plain language.
+2. Log daily health updates (symptoms, mood, weight, blood pressure, sleep, etc.) into their Digital Twin profile using the log_health_update tool.
+3. Help users prepare clear, structured questions for their next doctor appointment.
+4. Explain medical jargon from lab reports or prescriptions in simple, accurate terms.
+5. When the user asks to schedule medication reminders on Google Calendar, call create_calendar_event.
+6. Help users find Aura platform doctors or nearby clinics when they want a consultation.
+
+TOOLS AVAILABLE:
+- search_doctors(specialty, is_available): Find Aura platform doctors by specialty.
+- search_nearby_doctors(latitude, longitude, specialty, radius_km): Find in-person clinics/hospitals near the user.
+- get_doctor_details(doctor_id): Get full profile for a specific Aura platform doctor.
+- log_health_update(user_db_id, update_data): Log a health diary entry. Always pass {user_db_id}.
+- create_calendar_event(user_db_id, medication_name, dosage, frequency, start_date, start_time, timezone):
+    Create recurring medication reminder events on the user's own Google Calendar.
+    Always pass {user_db_id} as user_db_id.
+    If the user hasn't connected their calendar, tell them to go to GET /api/v1/calendar/auth.
+
+CALENDAR SCHEDULING RULES:
+- Ask the user for: medication name, dosage, frequency, preferred reminder time, and timezone.
+- Call create_calendar_event with those values. Do not guess frequency or time — confirm with the user.
+- For "twice daily", the tool automatically creates a morning and evening event.
+- After the call succeeds, tell the user their calendar events are set and remind them to store the event_ids.
+
+DOCTOR SEARCH RULES:
+- When the user asks about finding a doctor, call BOTH search_nearby_doctors() AND search_doctors().
+- Present in-person results first, then Aura platform options.
+
+STRICT RULES:
+1. You MUST NOT provide medical diagnoses or prescribe treatments.
+2. You MUST NOT interpret lab results as a definitive diagnosis — translate the data and encourage the user to discuss with their doctor.
+3. Always end responses touching on health concerns with: "⚠️ Disclaimer: I am an AI Health Companion, not a licensed medical professional. Please consult a qualified healthcare provider for medical advice."
+4. If a user describes a life-threatening emergency (chest pain, difficulty breathing, loss of consciousness), tell them immediately to call their local emergency number (911 / 999 / 112).
+5. Use the user's medical profile to give personalised, contextually relevant guidance — never to diagnose.
+"""
+
+        # Initialize the ADK Agent (Gemini 2.5 Flash) with all tools
+        # create_calendar_event is in AGENT_TOOLS — it calls the Google Calendar
+        # API directly per-user via stored OAuth tokens (no MCP server needed).
         self.agent = LlmAgent(
             model="gemini-2.5-flash",
             name="aura_assistant",
             instruction=system_instruction,
-            tools=AGENT_TOOLS,
+            tools=list(AGENT_TOOLS),
         )
 
-        # Initialize the Runner which handles the agent execution and session linking
+        # Runner handles agent execution and session linking
         self.runner = Runner(
             agent=self.agent,
             app_name=self.app_name,
@@ -167,19 +163,21 @@ class AuraAgentService:
         message: str,
         session_id: str,
         user_id: str,
+        user_db_id: Optional[int] = None,
         medical_profile: Optional[Dict[str, Any]] = None,
         location: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Retrieves the session history and generates a response from the agent.
-        Injects the user's medical profile and location into the ADK session state
-        so the system prompt placeholders are resolved correctly.
+        Injects the user's medical profile, location, DB id, and calendar account
+        nickname into ADK session state so system prompt placeholders resolve.
         """
         formatted_profile = self._format_profile(medical_profile)
         formatted_location = self._format_location(location)
         initial_state = {
             "user_profile_data": formatted_profile,
             "user_location": formatted_location,
+            "user_db_id": str(user_db_id) if user_db_id is not None else "",
         }
         logger.debug(
             "get_chat_response — user_id: %s, session_id: %s, message_length: %d",
@@ -207,9 +205,10 @@ class AuraAgentService:
             logger.debug(
                 "Resuming existing ADK session: %s for user: %s", session_id, user_id
             )
-            # Refresh profile and location on every request so updates are picked up
+            # Refresh profile, location, and identity on every request so updates are picked up
             session.state["user_profile_data"] = formatted_profile
             session.state["user_location"] = formatted_location
+            session.state["user_db_id"] = str(user_db_id) if user_db_id is not None else ""
 
         # Prepare the user's message in ADK format
         content = types.Content(role="user", parts=[types.Part(text=message)])
@@ -232,6 +231,11 @@ class AuraAgentService:
                 break
 
         return final_response_text
+
+
+    async def close(self) -> None:
+        """No-op kept for API compatibility. Previously closed the MCP SSE connection."""
+        logger.info("AuraAgentService.close() called — nothing to clean up.")
 
 
 # Create a singleton instance to be used across the app

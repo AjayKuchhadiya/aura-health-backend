@@ -25,12 +25,8 @@ from sqlalchemy.future import select
 from app.core.database import AsyncSessionLocal
 from app.models.doctor import Doctor as DoctorModel
 from app.models.user import User as UserModel
-from app.services.ambulance import AmbulanceSearchService
-from app.services.osm import (
-    get_emergency_number,
-    search_nearby_emergency_services,
-    search_nearby_healthcare,
-)
+from app.models.user_calendar_token import UserCalendarToken
+from app.services.osm import search_nearby_healthcare
 
 logger = logging.getLogger(__name__)
 
@@ -251,235 +247,137 @@ async def search_nearby_doctors(
 
 
 # ---------------------------------------------------------------------------
-# Ambulance tools
+# Health diary tool
 # ---------------------------------------------------------------------------
 
 
-async def find_nearest_ambulance(
-    latitude: float,
-    longitude: float,
-    country_code: str = "",
+async def log_health_update(user_db_id: int, update_data: dict) -> dict:
+    """
+    Log a health update into the user's Digital Twin profile in the database.
+
+    Call this tool whenever the user wants to record daily health data during
+    a conversation — for example: symptoms, mood, weight, blood pressure
+    readings, sleep quality, or any personal health note.
+
+    Args:
+        user_db_id:  The user's integer database ID (available in your session
+                     state as {user_db_id}).
+        update_data: A dict of health data to merge into the 'daily_logs' list
+                     inside the user's medical_profile.  Include a 'date' key
+                     (ISO 8601) and any relevant fields the user mentioned.
+                     Example: {"date": "2024-01-15", "symptoms": ["headache"],
+                               "mood": "tired", "weight_kg": 72.5}
+
+    Returns:
+        {"success": True} on success, or {"error": "..."} on failure.
+    """
+    logger.info("Tool: log_health_update — user_db_id=%s", user_db_id)
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(UserModel).where(UserModel.id == user_db_id)
+            )
+            user = result.scalars().first()
+            if not user:
+                return {"error": f"User {user_db_id} not found."}
+
+            profile = dict(user.medical_profile or {})
+            daily_logs = profile.setdefault("daily_logs", [])
+            daily_logs.append(update_data)
+            user.medical_profile = profile
+            await db.commit()
+        return {"success": True, "message": "Health update logged to your Digital Twin profile."}
+    except Exception as exc:
+        logger.exception("log_health_update failed")
+        return {"error": f"Failed to log health update: {exc}"}
+
+
+# ---------------------------------------------------------------------------
+# Google Calendar tool
+# ---------------------------------------------------------------------------
+
+
+async def create_calendar_event(
+    user_db_id: int,
+    medication_name: str,
+    dosage: str,
+    frequency: str,
+    start_date: str,
+    start_time: str = "08:00",
+    timezone: str = "UTC",
 ) -> dict:
     """
-    Locate the nearest available ambulance or emergency medical service given
-    the user's GPS coordinates.  Searches OpenStreetMap for real ambulance
-    stations and hospitals near the user, then falls back to the internal
-    platform fleet if OSM returns no results.
+    Create recurring Google Calendar reminder events for a medication.
 
-    Use this tool only when the user is experiencing or witnessing a medical
-    emergency and has shared their location coordinates.  Always include the
-    local emergency number in your response.
+    Call this tool when the user asks to schedule a medication reminder on
+    their Google Calendar after adding a new medication.
 
     Args:
-        latitude:     User's current latitude in decimal degrees (e.g. 37.7749).
-        longitude:    User's current longitude in decimal degrees (e.g. -122.4194).
-        country_code: ISO 3166-1 alpha-2 country code (e.g. 'US', 'GB', 'GH')
-                      used to look up the correct local emergency number.
-                      Leave blank if unknown.
+        user_db_id:       The user's integer database ID ({user_db_id} from session state).
+        medication_name:  Name of the medication, e.g. "Metformin".
+        dosage:           Dosage string, e.g. "500mg".
+        frequency:        How often to take it. Supported values: "once daily",
+                          "twice daily", "weekly", "monthly".
+        start_date:       ISO 8601 date when reminders should start, e.g. "2026-06-14".
+        start_time:       Time of first reminder in HH:MM format (24-hour), e.g. "08:00".
+        timezone:         IANA timezone name, e.g. "America/New_York". Defaults to UTC.
 
     Returns:
-        A dict with 'nearest_services' (list of nearby ambulance/hospital
-        facilities from OSM, each with name, address, phone, distance_km),
-        'emergency_number' (the local emergency dial number), and a
-        'platform_unit' if available from the internal fleet.  Returns an
-        'error' key on complete failure.
+        {"event_ids": [...], "success": True} on success, or {"error": "..."} on failure.
+        Store the returned event_ids on the medication record so the events can be
+        updated or deleted later.
     """
     logger.info(
-        "Tool: find_nearest_ambulance — lat=%s, lon=%s, country=%s",
-        latitude,
-        longitude,
-        country_code,
+        "Tool: create_calendar_event — user_db_id=%s, med=%s, freq=%s",
+        user_db_id, medication_name, frequency,
     )
     try:
-        emergency_number = get_emergency_number(country_code or None)
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(UserCalendarToken).where(UserCalendarToken.user_id == user_db_id)
+            )
+            cal_token = result.scalars().first()
 
-        # Primary: query OSM for real ambulance stations / hospitals nearby
-        osm_results = await search_nearby_emergency_services(
-            latitude=latitude,
-            longitude=longitude,
-            radius_m=10000,
-            limit=3,
-        )
-
-        # Fallback: internal stub fleet (always available as a secondary source)
-        platform_unit = await AmbulanceSearchService.find_nearest_ambulance(
-            latitude, longitude
-        )
-
-        if not osm_results and platform_unit is None:
+        if not cal_token:
             return {
-                "error": "No emergency services found near your location. "
-                f"CALL {emergency_number} IMMEDIATELY.",
-                "emergency_number": emergency_number,
+                "error": (
+                    "This user has not connected their Google Calendar yet. "
+                    "Ask them to visit GET /api/v1/calendar/auth to connect it first."
+                )
             }
 
+        from app.services.calendar import create_medication_reminder, decrypt_token
+
+        access_token = decrypt_token(cal_token.encrypted_access_token)
+        refresh_token = decrypt_token(cal_token.encrypted_refresh_token)
+
+        event_ids = await create_medication_reminder(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_expiry=cal_token.token_expiry,
+            medication_name=medication_name,
+            dosage=dosage,
+            frequency=frequency,
+            start_date=start_date,
+            start_time=start_time,
+            timezone=timezone,
+        )
+
+        logger.info(
+            "Calendar events created — user_db_id=%s, event_ids=%s", user_db_id, event_ids
+        )
         return {
-            "nearest_services": osm_results,  # real OSM data
-            "platform_unit": platform_unit,  # internal fleet fallback
-            "emergency_number": emergency_number,
-            "critical_note": (
-                f"⚠️ CALL {emergency_number} (local emergency services) IMMEDIATELY "
-                "in addition to using any platform dispatch."
+            "success": True,
+            "event_ids": event_ids,
+            "message": (
+                f"Created {len(event_ids)} recurring reminder(s) on Google Calendar for "
+                f"{medication_name} {dosage}. Store the event_ids on the medication record."
             ),
         }
 
     except Exception as exc:
-        logger.exception("find_nearest_ambulance tool failed")
-        return {
-            "error": f"Could not locate an ambulance: {exc}. "
-            "Please call emergency services immediately."
-        }
-
-
-async def request_ambulance(location_description: str) -> dict:
-    """
-    Request an ambulance dispatch to a described location (street address or landmark).
-
-    Use this tool when the user does not have GPS coordinates but can describe
-    their location in words (e.g. '123 Main Street, Apt 4B' or 'Central Park
-    near the fountain').  Only invoke this during a confirmed or suspected
-    medical emergency.
-
-    Args:
-        location_description: A plain-language description of the pickup location,
-                               such as a full street address or a nearby landmark.
-
-    Returns:
-        A dict with dispatch confirmation details including a 'request_id',
-        'status', and 'estimated_arrival_minutes'. Returns an 'error' key on
-        failure.
-    """
-    logger.info("Tool: request_ambulance — location='%s'", location_description)
-    try:
-        result = await AmbulanceSearchService.search_by_location(location_description)
-        if result is None:
-            return {
-                "error": "Unable to dispatch an ambulance to that location. "
-                "Please call emergency services (911 or local equivalent) immediately."
-            }
-        return {
-            "status": "dispatched",
-            "location": location_description,
-            "details": result,
-        }
-
-    except Exception as exc:
-        logger.exception("request_ambulance tool failed")
-        return {
-            "error": f"Ambulance request failed: {exc}. "
-            "Please call emergency services immediately."
-        }
-
-
-# ---------------------------------------------------------------------------
-# Emergency triage tool
-# ---------------------------------------------------------------------------
-
-
-async def assess_emergency_level(symptoms: str) -> dict:
-    """
-    Assess the urgency level of reported symptoms and return a recommended
-    triage action without providing a medical diagnosis.
-
-    Use this tool when the user describes symptoms and you need to decide
-    whether to recommend: (1) calling emergency services immediately,
-    (2) visiting an emergency room, (3) booking a same-day doctor appointment,
-    or (4) general self-care advice.
-
-    Args:
-        symptoms: A plain-language description of the symptoms or situation
-                  provided by the user, e.g. 'severe chest pain radiating to
-                  left arm' or 'mild headache for two days'.
-
-    Returns:
-        A dict with:
-          - 'urgency_level': one of 'critical', 'urgent', 'moderate', 'low'
-          - 'recommended_action': what the user should do next
-          - 'call_emergency': bool — True if 911/emergency services must be called
-          - 'disclaimer': the standard AI health navigator disclaimer
-    """
-    logger.info("Tool: assess_emergency_level — symptoms='%s'", symptoms)
-
-    symptoms_lower = symptoms.lower()
-
-    # Critical life-threatening keyword matching
-    critical_keywords = [
-        "chest pain",
-        "heart attack",
-        "can't breathe",
-        "cannot breathe",
-        "difficulty breathing",
-        "shortness of breath",
-        "unconscious",
-        "unresponsive",
-        "stroke",
-        "paralysis",
-        "severe bleeding",
-        "overdose",
-        "poisoning",
-        "loss of consciousness",
-        "seizure",
-        "anaphylaxis",
-        "allergic reaction",
-        "choking",
-    ]
-
-    urgent_keywords = [
-        "high fever",
-        "broken bone",
-        "fracture",
-        "deep cut",
-        "head injury",
-        "vomiting blood",
-        "blood in urine",
-        "severe abdominal pain",
-        "can't walk",
-        "fainting",
-        "dizziness",
-        "blurred vision",
-    ]
-
-    is_critical = any(kw in symptoms_lower for kw in critical_keywords)
-    is_urgent = any(kw in symptoms_lower for kw in urgent_keywords)
-
-    disclaimer = (
-        "⚠️ Disclaimer: I am an AI Health Navigator, not a licensed medical professional. "
-        "This information is not a diagnosis. Please consult a qualified healthcare provider "
-        "for medical advice."
-    )
-
-    if is_critical:
-        return {
-            "urgency_level": "critical",
-            "recommended_action": (
-                "CALL EMERGENCY SERVICES (911 or your local equivalent) IMMEDIATELY. "
-                "Do not wait. I can also dispatch an ambulance through the Aura platform "
-                "if you share your location."
-            ),
-            "call_emergency": True,
-            "disclaimer": disclaimer,
-        }
-    elif is_urgent:
-        return {
-            "urgency_level": "urgent",
-            "recommended_action": (
-                "Go to the nearest emergency room or urgent care centre. "
-                "If you cannot travel safely, call emergency services. "
-                "I can help you find an available doctor on Aura if needed."
-            ),
-            "call_emergency": False,
-            "disclaimer": disclaimer,
-        }
-    else:
-        return {
-            "urgency_level": "low",
-            "recommended_action": (
-                "Monitor your symptoms. Consider booking a consultation with a doctor "
-                "on the Aura platform. If symptoms worsen, seek immediate care."
-            ),
-            "call_emergency": False,
-            "disclaimer": disclaimer,
-        }
+        logger.exception("create_calendar_event failed")
+        return {"error": f"Failed to create calendar event: {exc}"}
 
 
 # ---------------------------------------------------------------------------
@@ -490,7 +388,6 @@ AGENT_TOOLS = [
     search_doctors,
     search_nearby_doctors,
     get_doctor_details,
-    find_nearest_ambulance,
-    request_ambulance,
-    assess_emergency_level,
+    log_health_update,
+    create_calendar_event,
 ]
