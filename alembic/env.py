@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.models.user import User
 from app.models.doctor import Doctor
 from app.models.medication import Medication
+from app.models.user_calendar_token import UserCalendarToken
 
 config = context.config
 

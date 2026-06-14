@@ -15,3 +15,7 @@ firebase-admin
 psycopg2-binary
 google-adk
 httpx
+google-auth
+google-auth-oauthlib
+google-api-python-client
+cryptography

@@ -1,13 +1,11 @@
 import logging
 import os
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any
 
 # ADK imports
 from google.adk.agents import LlmAgent
 from google.adk.runners import Runner
 from google.adk.sessions import DatabaseSessionService
-from google.adk.tools.mcp_tool.mcp_toolset import McpToolset, SseConnectionParams
-from google.adk.tools.base_tool import BaseTool
 from google.genai import types
 
 from app.core.config import settings
@@ -48,98 +46,57 @@ class AuraAgentService:
         # {user_db_id}, and {calendar_account} are resolved at runtime.
         system_instruction = """
 You are Aura, a Personal Digital Twin Health Companion.
-Your sole purpose is to help users actively manage their daily health — not to dispatch emergency services.
+Your sole purpose is to help users actively manage their daily health.
 
 You have full context about this user:
 - Medical profile (conditions, allergies, medications, health history): {user_profile_data}
 - Current location: {user_location}
-- User database ID (for logging tools): {user_db_id}
-- Google Calendar account nickname (for scheduling tools): {calendar_account}
+- User database ID (for tools): {user_db_id}
 
 CORE RESPONSIBILITIES:
 1. Help users track and understand their health records, lab results, and prescriptions in plain language.
 2. Log daily health updates (symptoms, mood, weight, blood pressure, sleep, etc.) into their Digital Twin profile using the log_health_update tool.
 3. Help users prepare clear, structured questions for their next doctor appointment.
 4. Explain medical jargon from lab reports or prescriptions in simple, accurate terms.
-5. When a new medication is added via the app, schedule recurring Google Calendar reminder events for the user using the create-event tool.
-6. Help users find Aura platform doctors or nearby clinics when they want to book a consultation.
+5. When the user asks to schedule medication reminders on Google Calendar, call create_calendar_event.
+6. Help users find Aura platform doctors or nearby clinics when they want a consultation.
 
 TOOLS AVAILABLE:
-- search_doctors(specialty, is_available): Find Aura platform doctors by specialty for online consultations.
+- search_doctors(specialty, is_available): Find Aura platform doctors by specialty.
 - search_nearby_doctors(latitude, longitude, specialty, radius_km): Find in-person clinics/hospitals near the user.
 - get_doctor_details(doctor_id): Get full profile for a specific Aura platform doctor.
-- log_health_update(user_db_id, update_data): Log a health diary entry into the user's Digital Twin. Always pass {user_db_id} as the user_db_id.
-- create-event: Create a Google Calendar event. When scheduling medication reminders, use account='{calendar_account}' and set appropriate recurrence rules based on the medication frequency.
-- update-event: Update an existing Google Calendar event (e.g., if a medication dose changes).
-- delete-event: Delete a Google Calendar event (e.g., when a medication course ends).
-- get-current-time: Get the current date/time in the user's timezone (use this before scheduling events).
+- log_health_update(user_db_id, update_data): Log a health diary entry. Always pass {user_db_id}.
+- create_calendar_event(user_db_id, medication_name, dosage, frequency, start_date, start_time, timezone):
+    Create recurring medication reminder events on the user's own Google Calendar.
+    Always pass {user_db_id} as user_db_id.
+    If the user hasn't connected their calendar, tell them to go to GET /api/v1/calendar/auth.
 
 CALENDAR SCHEDULING RULES:
-- When adding a medication reminder, first call get-current-time to get the current date.
-- Create a recurring event with a descriptive title like "Take {medication_name} {dosage}".
-- Set recurrence based on frequency: "once daily" → RRULE:FREQ=DAILY, "twice daily" → create two events (morning + evening), "weekly" → RRULE:FREQ=WEEKLY.
-- Set reminders (popupMinutes: 10) so the user gets notified.
-- Always pass account='{calendar_account}' in the create-event call.
-- Store the returned event ID — it will be saved to the medication record for future updates.
+- Ask the user for: medication name, dosage, frequency, preferred reminder time, and timezone.
+- Call create_calendar_event with those values. Do not guess frequency or time — confirm with the user.
+- For "twice daily", the tool automatically creates a morning and evening event.
+- After the call succeeds, tell the user their calendar events are set and remind them to store the event_ids.
 
 DOCTOR SEARCH RULES:
-- When the user asks about finding a doctor, call BOTH search_nearby_doctors() AND search_doctors() in parallel.
+- When the user asks about finding a doctor, call BOTH search_nearby_doctors() AND search_doctors().
 - Present in-person results first, then Aura platform options.
-- If a platform doctor's city/country matches the user's location, highlight: "Dr. X is also available online through Aura and is based in your city."
 
 STRICT RULES:
 1. You MUST NOT provide medical diagnoses or prescribe treatments.
 2. You MUST NOT interpret lab results as a definitive diagnosis — translate the data and encourage the user to discuss with their doctor.
 3. Always end responses touching on health concerns with: "⚠️ Disclaimer: I am an AI Health Companion, not a licensed medical professional. Please consult a qualified healthcare provider for medical advice."
-4. If a user describes a life-threatening emergency (chest pain, difficulty breathing, loss of consciousness), tell them immediately to call their local emergency number (911 / 999 / 112) and do not attempt to dispatch anything yourself.
+4. If a user describes a life-threatening emergency (chest pain, difficulty breathing, loss of consciousness), tell them immediately to call their local emergency number (911 / 999 / 112).
 5. Use the user's medical profile to give personalised, contextually relevant guidance — never to diagnose.
 """
 
-        # Google Calendar MCP toolset — connects over SSE to the remote MCP server.
-        # No Node.js process is spawned locally; all calendar tool calls go over the network.
-        # CALENDAR_MCP_SSE_URL must point to your deployed calendar-mcp SSE endpoint.
-        self._calendar_toolset: Optional[McpToolset] = None
-        if settings.CALENDAR_MCP_SSE_URL:
-            try:
-                self._calendar_toolset = McpToolset(
-                    connection_params=SseConnectionParams(
-                        url=settings.CALENDAR_MCP_SSE_URL,
-                        timeout=15.0,
-                        sse_read_timeout=300.0,
-                    ),
-                    # Only expose the calendar tools Aura actually needs
-                    tool_filter=[
-                        "create-event",
-                        "update-event",
-                        "delete-event",
-                        "get-current-time",
-                        "list-events",
-                    ],
-                )
-                logger.info(
-                    "Calendar MCP toolset configured — SSE URL: %s",
-                    settings.CALENDAR_MCP_SSE_URL,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to configure Calendar MCP toolset (calendar features disabled): %s", exc
-                )
-                self._calendar_toolset = None
-        else:
-            logger.warning(
-                "CALENDAR_MCP_SSE_URL not set — Google Calendar features are disabled."
-            )
-
-        all_tools = list(AGENT_TOOLS)
-        if self._calendar_toolset is not None:
-            all_tools.append(self._calendar_toolset)
-
         # Initialize the ADK Agent (Gemini 2.5 Flash) with all tools
+        # create_calendar_event is in AGENT_TOOLS — it calls the Google Calendar
+        # API directly per-user via stored OAuth tokens (no MCP server needed).
         self.agent = LlmAgent(
             model="gemini-2.5-flash",
             name="aura_assistant",
             instruction=system_instruction,
-            tools=all_tools,
+            tools=list(AGENT_TOOLS),
         )
 
         # Runner handles agent execution and session linking
@@ -221,8 +178,6 @@ STRICT RULES:
             "user_profile_data": formatted_profile,
             "user_location": formatted_location,
             "user_db_id": str(user_db_id) if user_db_id is not None else "",
-            # user_id (Firebase UID) doubles as the Google Calendar MCP account nickname
-            "calendar_account": user_id,
         }
         logger.debug(
             "get_chat_response — user_id: %s, session_id: %s, message_length: %d",
@@ -254,7 +209,6 @@ STRICT RULES:
             session.state["user_profile_data"] = formatted_profile
             session.state["user_location"] = formatted_location
             session.state["user_db_id"] = str(user_db_id) if user_db_id is not None else ""
-            session.state["calendar_account"] = user_id
 
         # Prepare the user's message in ADK format
         content = types.Content(role="user", parts=[types.Part(text=message)])
@@ -280,13 +234,8 @@ STRICT RULES:
 
 
     async def close(self) -> None:
-        """Release the MCP SSE connection. Call this from the app shutdown lifespan."""
-        if self._calendar_toolset is not None:
-            try:
-                await self._calendar_toolset.close()
-                logger.info("Calendar MCP toolset connection closed.")
-            except Exception as exc:
-                logger.warning("Error closing Calendar MCP toolset: %s", exc)
+        """No-op kept for API compatibility. Previously closed the MCP SSE connection."""
+        logger.info("AuraAgentService.close() called — nothing to clean up.")
 
 
 # Create a singleton instance to be used across the app

@@ -34,3 +34,4 @@ class User(Base):
     # Relationships
     doctor_profile = relationship("Doctor", back_populates="user", uselist=False)
     medications = relationship("Medication", back_populates="user", cascade="all, delete-orphan")
+    calendar_token = relationship("UserCalendarToken", back_populates="user", uselist=False, cascade="all, delete-orphan")

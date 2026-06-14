@@ -25,6 +25,7 @@ from sqlalchemy.future import select
 from app.core.database import AsyncSessionLocal
 from app.models.doctor import Doctor as DoctorModel
 from app.models.user import User as UserModel
+from app.models.user_calendar_token import UserCalendarToken
 from app.services.osm import search_nearby_healthcare
 
 logger = logging.getLogger(__name__)
@@ -291,6 +292,93 @@ async def log_health_update(user_db_id: int, update_data: dict) -> dict:
         return {"error": f"Failed to log health update: {exc}"}
 
 
+# ---------------------------------------------------------------------------
+# Google Calendar tool
+# ---------------------------------------------------------------------------
+
+
+async def create_calendar_event(
+    user_db_id: int,
+    medication_name: str,
+    dosage: str,
+    frequency: str,
+    start_date: str,
+    start_time: str = "08:00",
+    timezone: str = "UTC",
+) -> dict:
+    """
+    Create recurring Google Calendar reminder events for a medication.
+
+    Call this tool when the user asks to schedule a medication reminder on
+    their Google Calendar after adding a new medication.
+
+    Args:
+        user_db_id:       The user's integer database ID ({user_db_id} from session state).
+        medication_name:  Name of the medication, e.g. "Metformin".
+        dosage:           Dosage string, e.g. "500mg".
+        frequency:        How often to take it. Supported values: "once daily",
+                          "twice daily", "weekly", "monthly".
+        start_date:       ISO 8601 date when reminders should start, e.g. "2026-06-14".
+        start_time:       Time of first reminder in HH:MM format (24-hour), e.g. "08:00".
+        timezone:         IANA timezone name, e.g. "America/New_York". Defaults to UTC.
+
+    Returns:
+        {"event_ids": [...], "success": True} on success, or {"error": "..."} on failure.
+        Store the returned event_ids on the medication record so the events can be
+        updated or deleted later.
+    """
+    logger.info(
+        "Tool: create_calendar_event — user_db_id=%s, med=%s, freq=%s",
+        user_db_id, medication_name, frequency,
+    )
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(UserCalendarToken).where(UserCalendarToken.user_id == user_db_id)
+            )
+            cal_token = result.scalars().first()
+
+        if not cal_token:
+            return {
+                "error": (
+                    "This user has not connected their Google Calendar yet. "
+                    "Ask them to visit GET /api/v1/calendar/auth to connect it first."
+                )
+            }
+
+        from app.services.calendar import create_medication_reminder, decrypt_token
+
+        access_token = decrypt_token(cal_token.encrypted_access_token)
+        refresh_token = decrypt_token(cal_token.encrypted_refresh_token)
+
+        event_ids = await create_medication_reminder(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_expiry=cal_token.token_expiry,
+            medication_name=medication_name,
+            dosage=dosage,
+            frequency=frequency,
+            start_date=start_date,
+            start_time=start_time,
+            timezone=timezone,
+        )
+
+        logger.info(
+            "Calendar events created — user_db_id=%s, event_ids=%s", user_db_id, event_ids
+        )
+        return {
+            "success": True,
+            "event_ids": event_ids,
+            "message": (
+                f"Created {len(event_ids)} recurring reminder(s) on Google Calendar for "
+                f"{medication_name} {dosage}. Store the event_ids on the medication record."
+            ),
+        }
+
+    except Exception as exc:
+        logger.exception("create_calendar_event failed")
+        return {"error": f"Failed to create calendar event: {exc}"}
+
 
 # ---------------------------------------------------------------------------
 # Public list of all tools to register with the agent
@@ -301,4 +389,5 @@ AGENT_TOOLS = [
     search_nearby_doctors,
     get_doctor_details,
     log_health_update,
+    create_calendar_event,
 ]

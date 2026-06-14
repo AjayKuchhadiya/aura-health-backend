@@ -13,6 +13,7 @@ from app.core.logging_config import setup_logging
 from app.models.user import User
 from app.models.doctor import Doctor
 from app.models.medication import Medication
+from app.models.user_calendar_token import UserCalendarToken
 
 # Initialise logging before anything else
 setup_logging()
