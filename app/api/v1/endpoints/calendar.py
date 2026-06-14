@@ -123,9 +123,9 @@ async def calendar_callback(
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
 
-    # Exchange code for tokens
+    # Exchange code for tokens (pass state so the PKCE verifier can be retrieved)
     try:
-        token_data = exchange_code_for_tokens(code)
+        token_data = exchange_code_for_tokens(code, state=state)
     except Exception as exc:
         logger.exception("Token exchange failed for user_id: %s", user_db_id)
         raise HTTPException(status_code=502, detail=f"Google token exchange failed: {exc}")

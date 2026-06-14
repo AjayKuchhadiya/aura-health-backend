@@ -53,6 +53,13 @@ def decrypt_token(encrypted: str) -> str:
 
 _SCOPES = ["https://www.googleapis.com/auth/calendar.events"]
 
+# Module-level store for Flow objects keyed by OAuth state.
+# The same Flow instance must be used for both authorization_url() and
+# fetch_token() so its internal PKCE code_verifier survives across the
+# two HTTP requests (GET /auth → GET /callback).
+# Entries are consumed (popped) in exchange_code_for_tokens.
+_pending_flows: dict = {}
+
 
 def _build_flow(state: Optional[str] = None) -> Flow:
     """Build a google-auth-oauthlib Flow from env-var credentials."""
@@ -84,6 +91,8 @@ def build_authorization_url(state: str) -> str:
     access_type=offline ensures we get a refresh_token.
     prompt=consent forces Google to always return the refresh_token
     (important for returning users — without this, Google only sends it once).
+    The Flow object is stored by state so the same instance (including its
+    internal PKCE code_verifier) is reused during token exchange.
     """
     flow = _build_flow()
     auth_url, _ = flow.authorization_url(
@@ -92,15 +101,22 @@ def build_authorization_url(state: str) -> str:
         state=state,
         include_granted_scopes="true",
     )
+    # Persist the flow so fetch_token() can reuse the same PKCE verifier
+    _pending_flows[state] = flow
     return auth_url
 
 
-def exchange_code_for_tokens(code: str) -> dict:
+def exchange_code_for_tokens(code: str, state: str = "") -> dict:
     """
     Exchange the one-time authorization code for access + refresh tokens.
+    Reuses the Flow object stored during build_authorization_url so that
+    any PKCE code_verifier is automatically included in the token request.
     Returns a dict with access_token, refresh_token, expiry, and email.
     """
-    flow = _build_flow()
+    # Retrieve and consume the stored flow (falls back to a fresh one)
+    flow = _pending_flows.pop(state, None) if state else None
+    if flow is None:
+        flow = _build_flow(state=state or None)
     flow.fetch_token(code=code)
     creds: Credentials = flow.credentials
 
