@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from typing import Optional, Dict, Any
@@ -6,6 +7,7 @@ from typing import Optional, Dict, Any
 from google.adk.agents import LlmAgent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
+from fastapi import HTTPException
 from google.genai import types
 
 from app.core.config import settings
@@ -92,29 +94,44 @@ STRICT RULES:
 6. You do NOT help find doctors or clinics. If asked, politely explain your focus is on record analysis and medication adherence, and suggest they use a dedicated provider-search service.
 """
 
-        # Initialize the ADK Agent (Gemini 2.5 Flash) with all tools
-        # create_calendar_event is in AGENT_TOOLS — it calls the Google Calendar
-        # API directly per-user via stored OAuth tokens (no MCP server needed).
-        self.agent = LlmAgent(
+        # Primary agent — Gemini 2.5 Flash (best quality)
+        self.primary_agent = LlmAgent(
             model="gemini-2.5-flash",
-            name="aura_assistant",
+            name="aura_primary",
             instruction=system_instruction,
             tools=list(AGENT_TOOLS),
         )
-
-        # Runner handles agent execution and session linking
-        self.runner = Runner(
-            agent=self.agent,
+        self.primary_runner = Runner(
+            agent=self.primary_agent,
             app_name=self.app_name,
             session_service=self.session_service,
         )
-        logger.info("AuraAgentService initialised with model: gemini-2.5-flash")
+
+        # Fallback agent — Gemini 2.0 Flash Lite (lighter, less congested)
+        self.fallback_agent = LlmAgent(
+            model="gemini-2.0-flash-lite",
+            name="aura_fallback",
+            instruction=system_instruction,
+            tools=list(AGENT_TOOLS),
+        )
+        self.fallback_runner = Runner(
+            agent=self.fallback_agent,
+            app_name=self.app_name,
+            session_service=self.session_service,
+        )
+        logger.info("AuraAgentService initialised — primary: gemini-2.5-flash, fallback: gemini-2.0-flash-lite")
 
     def _format_profile(self, medical_profile: Optional[Dict[str, Any]]) -> str:
         """Serialize the user's medical profile into a readable string for the prompt."""
         if not medical_profile:
             return "No medical profile on file for this user."
         try:
+            # Truncate daily_logs to the last 7 entries to avoid burning TPM
+            # quota by sending the entire health diary on every request.
+            if "daily_logs" in medical_profile and isinstance(medical_profile["daily_logs"], list):
+                medical_profile = dict(medical_profile)  # shallow copy — don't mutate the original
+                medical_profile["daily_logs"] = medical_profile["daily_logs"][-7:]
+
             mh = medical_profile.get("medical_history", {})
             parts = []
             if mh.get("blood_type"):
@@ -193,21 +210,72 @@ STRICT RULES:
         content = types.Content(role="user", parts=[types.Part(text=message)])
 
         final_response_text = "I'm sorry, I couldn't process your request."
+        _capacity_errors = ("503", "429", "UNAVAILABLE", "RESOURCE_EXHAUSTED")
+        max_retries = 2
 
-        # Run the agent asynchronously. It yields events until the final response is generated.
-        async for event in self.runner.run_async(
-            user_id=user_id, session_id=session_id, new_message=content
-        ):
-            # Check if this event contains the final answer from the LLM
-            if event.is_final_response():
-                if event.content and event.content.parts:
-                    final_response_text = event.content.parts[0].text
-                    logger.debug(
-                        "Final response received — session_id: %s, length: %d",
-                        session_id,
-                        len(final_response_text),
+        # ── Phase 1: Primary runner with exponential-backoff retry ──────────
+        primary_failed = False
+        for attempt in range(max_retries):
+            try:
+                async for event in self.primary_runner.run_async(
+                    user_id=user_id, session_id=session_id, new_message=content
+                ):
+                    if event.is_final_response():
+                        if event.content and event.content.parts:
+                            final_response_text = event.content.parts[0].text
+                            logger.debug(
+                                "Primary final response — session_id: %s, length: %d",
+                                session_id, len(final_response_text),
+                            )
+                        return final_response_text
+            except Exception as exc:
+                err_str = str(exc)
+                if any(marker in err_str for marker in _capacity_errors):
+                    wait = 2 ** attempt
+                    logger.warning(
+                        "Primary model capacity error (attempt %d/%d), retrying in %ds — %s",
+                        attempt + 1, max_retries, wait, err_str[:120],
                     )
-                break
+                    await asyncio.sleep(wait)
+                    # Reset content for the next attempt — the message object is reusable
+                    content = types.Content(role="user", parts=[types.Part(text=message)])
+                else:
+                    raise  # non-capacity error — propagate immediately
+            else:
+                break  # ran_async finished without raising — shouldn't reach here, but safe
+        else:
+            primary_failed = True
+
+        # ── Phase 2: Fallback runner ─────────────────────────────────────────
+        if primary_failed:
+            logger.warning(
+                "Primary exhausted after %d retries — switching to fallback model for session: %s",
+                max_retries, session_id,
+            )
+            try:
+                async for event in self.fallback_runner.run_async(
+                    user_id=user_id, session_id=session_id, new_message=content
+                ):
+                    if event.is_final_response():
+                        if event.content and event.content.parts:
+                            final_response_text = event.content.parts[0].text
+                            logger.info(
+                                "Fallback final response — session_id: %s, length: %d",
+                                session_id, len(final_response_text),
+                            )
+                        return final_response_text
+            except Exception as exc:
+                err_str = str(exc)
+                if any(marker in err_str for marker in _capacity_errors):
+                    logger.warning("Fallback model also at capacity — %s", err_str[:120])
+                    raise HTTPException(
+                        status_code=503,
+                        detail=(
+                            "The AI assistant is experiencing high demand across all available models. "
+                            "Please wait a moment and try again."
+                        ),
+                    )
+                raise  # unexpected error
 
         return final_response_text
 

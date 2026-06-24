@@ -121,9 +121,13 @@ async def run_chat(
         return ChatResponse(reply=reply_text, session_id=session_id)
 
     except HTTPException:
-        raise  # re-raise FastAPI exceptions unchanged
+        raise  # re-raise FastAPI exceptions unchanged (includes 503 from agent.py)
 
     except Exception as e:
+        # If agent.py raised an HTTPException (e.g. 503 after fallback exhausted),
+        # let it bubble up unchanged instead of wrapping it in a 500.
+        if isinstance(e, HTTPException):
+            raise
         err_str = str(e)
         # Gemini 503 — model overloaded
         if "503" in err_str or "UNAVAILABLE" in err_str:
