@@ -1,8 +1,8 @@
 ﻿"""Health Records upload endpoint — /api/v1/health-records"""
 
 import logging
-from datetime import datetime
-from typing import Set
+from datetime import datetime, date
+from typing import Optional, Set
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy import select
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_user_token
 from app.core.database import get_db
+from app.models.lab_result import LabResult
 from app.models.user import User as UserModel
 
 logger = logging.getLogger(__name__)
@@ -88,7 +89,7 @@ async def upload_health_record(
 
     extraction = await extract_medical_data(file_bytes, file.content_type)
 
-    # --- Merge into Digital Twin JSONB ---
+    # --- Merge into Digital Twin JSONB & persist structured lab rows ---
     if "error" not in extraction:
         profile = dict(user.medical_profile or {})
 
@@ -108,8 +109,48 @@ async def upload_health_record(
                 existing_meds.append(med)
 
         user.medical_profile = profile
+
+        # Persist each lab result as a typed row in the lab_results table
+        doc_date_str: Optional[str] = extraction.get("document_date")
+        doc_date: Optional[date] = None
+        if doc_date_str:
+            try:
+                doc_date = date.fromisoformat(doc_date_str)
+            except ValueError:
+                pass
+
+        for lab in extraction.get("lab_results", []):
+            raw_value = lab.get("value")
+            try:
+                numeric_value = float(raw_value)
+            except (TypeError, ValueError):
+                logger.warning("Skipping lab result with non-numeric value: %s", raw_value)
+                continue
+
+            taken_str = lab.get("date_taken") or doc_date_str
+            taken_date: Optional[date] = None
+            if taken_str:
+                try:
+                    taken_date = date.fromisoformat(taken_str)
+                except ValueError:
+                    taken_date = doc_date
+
+            db.add(LabResult(
+                user_id=user.id,
+                test_name=lab.get("test_name", "Unknown"),
+                value=numeric_value,
+                unit=lab.get("unit"),
+                reference_range=lab.get("reference_range"),
+                flag=lab.get("flag"),
+                date_taken=taken_date,
+            ))
+
         await db.commit()
-        logger.info("Health record saved to Digital Twin — user_id: %s", user.id)
+        logger.info(
+            "Health record saved — user_id: %s, labs persisted: %d",
+            user.id,
+            len(extraction.get("lab_results", [])),
+        )
 
     return {
         "file_url": public_url,
@@ -120,3 +161,45 @@ async def upload_health_record(
             else "Record uploaded but extraction had issues: " + str(extraction.get("error"))
         ),
     }
+
+
+@router.get("/labs/timeline")
+async def get_labs_timeline(
+    test_name: Optional[str] = None,
+    token_data: dict = Depends(get_current_user_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Return a user's lab results sorted chronologically.
+
+    Optionally filter by test_name (case-insensitive substring match).
+    Response shape is ready for Recharts / Tremor time-series charts:
+    each entry has { date, test_name, value, unit, reference_range, flag }.
+    """
+    user = await _resolve_user(token_data["uid"], db)
+
+    stmt = (
+        select(LabResult)
+        .where(LabResult.user_id == user.id)
+        .order_by(LabResult.date_taken.asc().nulls_last(), LabResult.created_at.asc())
+    )
+    if test_name:
+        stmt = stmt.where(LabResult.test_name.ilike(f"%{test_name}%"))
+
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+
+    data = [
+        {
+            "id": row.id,
+            "test_name": row.test_name,
+            "value": row.value,
+            "unit": row.unit,
+            "reference_range": row.reference_range,
+            "flag": row.flag,
+            "date": row.date_taken.isoformat() if row.date_taken else None,
+        }
+        for row in rows
+    ]
+
+    return {"total": len(data), "results": data}

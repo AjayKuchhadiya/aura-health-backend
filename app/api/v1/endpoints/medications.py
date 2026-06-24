@@ -13,6 +13,7 @@ from app.api.deps import get_current_user_token
 from app.core.database import get_db
 from app.models.medication import Medication as MedicationModel
 from app.models.user import User as UserModel
+from app.services.rxnav import check_drug_interactions
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,12 @@ class MedicationRead(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class MedicationCreateResponse(MedicationRead):
+    """Extends MedicationRead with an optional drug interaction warning."""
+    interaction_warning: Optional[str] = None
+    interactions_found: int = 0
+
+
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
@@ -79,7 +86,7 @@ async def _resolve_user(firebase_uid: str, db: AsyncSession) -> UserModel:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/", response_model=MedicationRead, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=MedicationCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_medication(
     payload: MedicationCreate,
     token_data: dict = Depends(get_current_user_token),
@@ -88,10 +95,22 @@ async def create_medication(
     """
     Add a new medication to the user's regimen.
 
-    After saving, ask Aura via POST /chat/run to schedule recurring Google
-    Calendar reminders — the agent will invoke the MCP calendar tools.
+    Before saving, checks for drug-drug interactions between the new medication
+    and the user's existing regimen via the NLM RxNav API. If a conflict is
+    found, an AI-translated patient-friendly warning is included in the response.
+    The medication is always saved — the warning is advisory only, prompting the
+    user to consult their doctor.
     """
     user = await _resolve_user(token_data["uid"], db)
+
+    # Fetch existing medication names for interaction check
+    existing_result = await db.execute(
+        select(MedicationModel.medication_name)
+        .where(MedicationModel.user_id == user.id)
+    )
+    existing_names: list[str] = [row[0] for row in existing_result.all()]
+
+    # Save the new medication first
     med = MedicationModel(
         user_id=user.id,
         medication_name=payload.medication_name,
@@ -105,7 +124,29 @@ async def create_medication(
     await db.commit()
     await db.refresh(med)
     logger.info("Medication created — user_id: %s, med_id: %s", user.id, med.id)
-    return med
+
+    # Run interaction check (non-blocking — failure returns no warning, not an error)
+    interaction_warning: Optional[str] = None
+    interactions_found: int = 0
+    try:
+        result = await check_drug_interactions(
+            new_drug=payload.medication_name,
+            existing_drugs=existing_names,
+        )
+        if result["has_interaction"]:
+            interaction_warning = result["warning"]
+            interactions_found = result["interactions_found"]
+            logger.warning(
+                "Drug interaction detected — user_id: %s, new_med: %s, interactions: %d",
+                user.id, payload.medication_name, interactions_found,
+            )
+    except Exception as exc:
+        logger.warning("Interaction check failed (non-fatal): %s", exc)
+
+    response_data = MedicationCreateResponse.model_validate(med)
+    response_data.interaction_warning = interaction_warning
+    response_data.interactions_found = interactions_found
+    return response_data
 
 
 @router.get("/", response_model=List[MedicationRead])
