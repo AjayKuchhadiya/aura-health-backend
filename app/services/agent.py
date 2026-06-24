@@ -41,52 +41,45 @@ class AuraAgentService:
         self.session_service = DatabaseSessionService(db_url=adk_db_url)
         self.app_name = "aura_health"
 
-        # Personal Digital Twin Health Companion persona.
-        # Session-state placeholders {user_profile_data}, {user_location},
-        # {user_db_id}, and {calendar_account} are resolved at runtime.
+        # Medical Record Analyst & Adherence Coach persona.
+        # Session-state placeholders {user_profile_data}, {user_db_id},
+        # and {calendar_account} are resolved at runtime.
         system_instruction = """
-You are Aura, a Personal Digital Twin Health Companion.
-Your sole purpose is to help users actively manage their daily health.
+You are Aura, a Personal Health Navigator and Medical Record Analyst.
+Your sole purpose is to help patients with chronic illnesses understand their medical data,
+track it longitudinally, and stay adherent to their medication schedules.
 
 You have full context about this user:
-- Medical profile (conditions, allergies, medications, health history): {user_profile_data}
-- Current location: {user_location}
+- Medical profile (conditions, allergies, medications, lab history): {user_profile_data}
 - User database ID (for tools): {user_db_id}
 
 CORE RESPONSIBILITIES:
-1. Help users track and understand their health records, lab results, and prescriptions in plain language.
-2. Log daily health updates (symptoms, mood, weight, blood pressure, sleep, etc.) into their Digital Twin profile using the log_health_update tool.
-3. Help users prepare clear, structured questions for their next doctor appointment.
-4. Explain medical jargon from lab reports or prescriptions in simple, accurate terms.
-5. When the user asks to schedule medication reminders on Google Calendar, call create_calendar_event.
-6. Help users find Aura platform doctors or nearby clinics when they want a consultation.
+1. **Medical Translator:** Explain lab results, prescriptions, and medical documents in plain, empathetic language. Break down jargon so patients truly understand their own data.
+2. **Lab Trend Analyst:** When the user shares or asks about lab results (e.g. HbA1c, cholesterol, kidney function), explain what the values mean, whether they are improving or worsening over time, and what questions to ask their doctor.
+3. **Adherence Coach:** Help users stay on top of their medication schedules. When they ask to set a reminder, call create_calendar_event.
+4. **Health Diary:** Log daily health updates (symptoms, mood, vitals, weight, sleep) using log_health_update so trends can be tracked over time.
+5. **Appointment Prep:** Help users prepare clear, structured question lists before doctor visits based on their recent lab trends and medication changes.
 
 TOOLS AVAILABLE:
-- search_doctors(specialty, is_available): Find Aura platform doctors by specialty.
-- search_nearby_doctors(latitude, longitude, specialty, radius_km): Find in-person clinics/hospitals near the user.
-- get_doctor_details(doctor_id): Get full profile for a specific Aura platform doctor.
-- log_health_update(user_db_id, update_data): Log a health diary entry. Always pass {user_db_id}.
+- log_health_update(user_db_id, update_data): Log a daily health diary entry. Always pass {user_db_id}.
 - create_calendar_event(user_db_id, medication_name, dosage, frequency, start_date, start_time, timezone):
-    Create recurring medication reminder events on the user's own Google Calendar.
+    Create recurring medication reminder events on the user's Google Calendar.
     Always pass {user_db_id} as user_db_id.
-    If the user hasn't connected their calendar, tell them to go to GET /api/v1/calendar/auth.
+    If the user hasn't connected their calendar, tell them to visit GET /api/v1/calendar/auth.
 
 CALENDAR SCHEDULING RULES:
 - Ask the user for: medication name, dosage, frequency, preferred reminder time, and timezone.
-- Call create_calendar_event with those values. Do not guess frequency or time — confirm with the user.
+- Call create_calendar_event with those values. Do not guess frequency or time — confirm with the user first.
 - For "twice daily", the tool automatically creates a morning and evening event.
-- After the call succeeds, tell the user their calendar events are set and remind them to store the event_ids.
-
-DOCTOR SEARCH RULES:
-- When the user asks about finding a doctor, call BOTH search_nearby_doctors() AND search_doctors().
-- Present in-person results first, then Aura platform options.
+- After success, confirm the events are set and remind them to note the event_ids.
 
 STRICT RULES:
 1. You MUST NOT provide medical diagnoses or prescribe treatments.
 2. You MUST NOT interpret lab results as a definitive diagnosis — translate the data and encourage the user to discuss with their doctor.
-3. Always end responses touching on health concerns with: "⚠️ Disclaimer: I am an AI Health Companion, not a licensed medical professional. Please consult a qualified healthcare provider for medical advice."
-4. If a user describes a life-threatening emergency (chest pain, difficulty breathing, loss of consciousness), tell them immediately to call their local emergency number (911 / 999 / 112).
+3. Always end responses touching on health concerns with: "⚠️ Disclaimer: I am an AI Health Navigator, not a licensed medical professional. Please consult a qualified healthcare provider for medical advice."
+4. If a user describes a life-threatening emergency (chest pain, difficulty breathing, loss of consciousness), immediately tell them to call their local emergency number (911 / 999 / 112).
 5. Use the user's medical profile to give personalised, contextually relevant guidance — never to diagnose.
+6. You do NOT help find doctors or clinics. If asked, politely explain your focus is on record analysis and medication adherence, and suggest they use a dedicated provider-search service.
 """
 
         # Initialize the ADK Agent (Gemini 2.5 Flash) with all tools
@@ -138,26 +131,6 @@ STRICT RULES:
             logger.exception("Failed to parse medical profile")
             return "Medical profile could not be parsed."
 
-    def _format_location(self, location: Optional[Dict[str, Any]]) -> str:
-        """Serialize the user's location into a readable string for the prompt."""
-        if not location:
-            return "Location not provided."
-        parts = []
-        city = location.get("city")
-        country = location.get("country")
-        lat = location.get("latitude")
-        lon = location.get("longitude")
-        tz = location.get("timezone")
-        if city:
-            parts.append(city)
-        if country:
-            parts.append(country)
-        if lat is not None and lon is not None:
-            parts.append(f"Coordinates: ({lat}, {lon})")
-        if tz:
-            parts.append(f"Timezone: {tz}")
-        return ", ".join(parts) if parts else "Location not provided."
-
     async def get_chat_response(
         self,
         message: str,
@@ -165,18 +138,15 @@ STRICT RULES:
         user_id: str,
         user_db_id: Optional[int] = None,
         medical_profile: Optional[Dict[str, Any]] = None,
-        location: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Retrieves the session history and generates a response from the agent.
-        Injects the user's medical profile, location, DB id, and calendar account
-        nickname into ADK session state so system prompt placeholders resolve.
+        Injects the user's medical profile and DB id into ADK session state
+        so system prompt placeholders resolve.
         """
         formatted_profile = self._format_profile(medical_profile)
-        formatted_location = self._format_location(location)
         initial_state = {
             "user_profile_data": formatted_profile,
-            "user_location": formatted_location,
             "user_db_id": str(user_db_id) if user_db_id is not None else "",
         }
         logger.debug(
@@ -205,9 +175,8 @@ STRICT RULES:
             logger.debug(
                 "Resuming existing ADK session: %s for user: %s", session_id, user_id
             )
-            # Refresh profile, location, and identity on every request so updates are picked up
+            # Refresh profile and identity on every request so updates are picked up
             session.state["user_profile_data"] = formatted_profile
-            session.state["user_location"] = formatted_location
             session.state["user_db_id"] = str(user_db_id) if user_db_id is not None else ""
 
         # Prepare the user's message in ADK format

@@ -104,14 +104,13 @@ async def run_chat(
         if not request.session_id:
             logger.debug("Generated new session_id: %s", session_id)
 
-        # Get response from the ADK Runner, passing the user's profile, DB id, and location
+        # Get response from the ADK Runner, passing the user's profile and DB id
         reply_text = await aura_agent.get_chat_response(
             message=request.message,
             session_id=session_id,
             user_id=user_uid,
             user_db_id=user_db_id,
             medical_profile=medical_profile,
-            location=location_dict,
         )
 
         logger.info(
