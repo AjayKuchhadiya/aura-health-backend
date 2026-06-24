@@ -5,7 +5,7 @@ from typing import Optional, Dict, Any
 # ADK imports
 from google.adk.agents import LlmAgent
 from google.adk.runners import Runner
-from google.adk.sessions import DatabaseSessionService
+from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from app.core.config import settings
@@ -25,20 +25,14 @@ os.environ["GOOGLE_API_KEY"] = settings.GEMINI_API_KEY
 class AuraAgentService:
     def __init__(self):
         logger.info("Initialising AuraAgentService")
-        # Build the ADK session DB URL with prepared statement caching disabled.
-        # This is required when the database sits behind a connection pooler
-        # (e.g. PgBouncer / Supabase / Neon) running in transaction or statement
-        # pool mode, which does not support asyncpg prepared statements.
-        adk_db_url = settings.DATABASE_URL
-        # Ensure the scheme is asyncpg-based (ADK requires async dialect)
-        if adk_db_url.startswith("postgresql://"):
-            adk_db_url = adk_db_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-        elif adk_db_url.startswith("postgres://"):
-            adk_db_url = adk_db_url.replace("postgres://", "postgresql+asyncpg://", 1)
-        # Append prepared_statement_cache_size=0 to disable asyncpg statement caching
-        separator = "&" if "?" in adk_db_url else "?"
-        adk_db_url = f"{adk_db_url}{separator}prepared_statement_cache_size=0"
-        self.session_service = DatabaseSessionService(db_url=adk_db_url)
+        # InMemorySessionService keeps chat sessions in RAM.
+        # This avoids the DuplicatePreparedStatementError that
+        # DatabaseSessionService causes when Supabase/PgBouncer runs in
+        # transaction-pool mode (the pool reuses asyncpg connections across
+        # sessions, causing asyncpg's internal prepared-statement cache to
+        # collide on the server side — even with cache_size=0 the health-check
+        # ping itself creates transient statements that conflict).
+        self.session_service = InMemorySessionService()
         self.app_name = "aura_health"
 
         # Medical Record Analyst & Adherence Coach persona.
@@ -57,11 +51,27 @@ CORE RESPONSIBILITIES:
 1. **Medical Translator:** Explain lab results, prescriptions, and medical documents in plain, empathetic language. Break down jargon so patients truly understand their own data.
 2. **Lab Trend Analyst:** When the user shares or asks about lab results (e.g. HbA1c, cholesterol, kidney function), explain what the values mean, whether they are improving or worsening over time, and what questions to ask their doctor.
 3. **Adherence Coach:** Help users stay on top of their medication schedules. When they ask to set a reminder, call create_calendar_event.
-4. **Health Diary:** Log daily health updates (symptoms, mood, vitals, weight, sleep) using log_health_update so trends can be tracked over time.
+4. **Health Diary:** Help users record daily health updates (symptoms, mood, vitals, weight, sleep) in their health diary using log_health_update. Always have a brief conversation to gather context BEFORE logging — see HEALTH DIARY RULES below.
 5. **Appointment Prep:** Help users prepare clear, structured question lists before doctor visits based on their recent lab trends and medication changes.
 
+HEALTH DIARY RULES (follow these strictly for every symptom or health update):
+- NEVER call log_health_update on the first mention of a symptom. First engage empathetically and gather context.
+- Ask ONE follow-up question at a time — never list multiple questions in one reply. Wait for the user's answer before asking the next one. Think of it as a natural back-and-forth conversation, not a form.
+- Good follow-up questions to work through one by one (choose the most relevant order based on context):
+    • How long have you been experiencing this?
+    • Did anything trigger it (food, activity, stress)?
+    • How severe is it on a scale of 1–10?
+    • Are there any other symptoms alongside it?
+    • Have you taken any medication for it?
+- After gathering enough context (typically 2–3 exchanges), do TWO things in a single reply — in this exact order:
+    1. Give 1–2 practical, gentle suggestions relevant to the symptom (e.g. "Try sipping some lukewarm water and resting. If the pain persists or worsens, consider consulting a doctor."). Keep it brief and actionable.
+    2. Ask: "Would you like me to log this in your health diary?" — do NOT summarise or repeat back what the user already told you. They lived it; they know.
+- Only call log_health_update AFTER the user explicitly confirms they want it logged.
+- Include all the context gathered (duration, severity, triggers, associated symptoms) in the update_data dict — not just the symptom name.
+- Only offer to log when the user has shared a genuine health concern (symptom, pain, discomfort, mood issue). Do NOT offer to log for general questions, medication queries, or lab result discussions.
+
 TOOLS AVAILABLE:
-- log_health_update(user_db_id, update_data): Log a daily health diary entry. Always pass {user_db_id}.
+- log_health_update(user_db_id, update_data): Log a health diary entry. Always pass {user_db_id}. Only call this after user confirms.
 - create_calendar_event(user_db_id, medication_name, dosage, frequency, start_date, start_time, timezone):
     Create recurring medication reminder events on the user's Google Calendar.
     Always pass {user_db_id} as user_db_id.
@@ -76,7 +86,7 @@ CALENDAR SCHEDULING RULES:
 STRICT RULES:
 1. You MUST NOT provide medical diagnoses or prescribe treatments.
 2. You MUST NOT interpret lab results as a definitive diagnosis — translate the data and encourage the user to discuss with their doctor.
-3. Always end responses touching on health concerns with: "⚠️ Disclaimer: I am an AI Health Navigator, not a licensed medical professional. Please consult a qualified healthcare provider for medical advice."
+3. NEVER append a disclaimer sentence to your replies. The UI already shows a persistent disclaimer to the user.
 4. If a user describes a life-threatening emergency (chest pain, difficulty breathing, loss of consciousness), immediately tell them to call their local emergency number (911 / 999 / 112).
 5. Use the user's medical profile to give personalised, contextually relevant guidance — never to diagnose.
 6. You do NOT help find doctors or clinics. If asked, politely explain your focus is on record analysis and medication adherence, and suggest they use a dedicated provider-search service.

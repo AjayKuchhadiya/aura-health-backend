@@ -120,8 +120,36 @@ async def run_chat(
         )
         return ChatResponse(reply=reply_text, session_id=session_id)
 
+    except HTTPException:
+        raise  # re-raise FastAPI exceptions unchanged
+
     except Exception as e:
+        err_str = str(e)
+        # Gemini 503 — model overloaded
+        if "503" in err_str or "UNAVAILABLE" in err_str:
+            logger.warning(
+                "Gemini 503 for uid: %s — %s", token_data.get("uid"), err_str
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Aura's AI engine is experiencing high demand right now. "
+                    "Please wait a moment and try again."
+                ),
+            )
+        # Gemini 429 — free-tier quota exhausted
+        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+            logger.warning(
+                "Gemini 429 for uid: %s — %s", token_data.get("uid"), err_str
+            )
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Aura has reached its daily request limit. "
+                    "Please try again tomorrow or contact support to upgrade the plan."
+                ),
+            )
         logger.exception(
             "Chat endpoint error for uid: %s — %s", token_data.get("uid"), e
         )
-        raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Agent error: {err_str}")
