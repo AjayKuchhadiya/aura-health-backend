@@ -19,6 +19,7 @@ class Medication(Base):
     medication_name = Column(String, nullable=False)
     dosage = Column(String, nullable=False)       # e.g. "500mg"
     frequency = Column(String, nullable=False)    # e.g. "twice daily"
+    reminder_time = Column(String, nullable=True)  # e.g. "08:00" (HH:MM, 24h)
     start_date = Column(Date, nullable=False)
     end_date = Column(Date, nullable=True)
     notes = Column(String, nullable=True)

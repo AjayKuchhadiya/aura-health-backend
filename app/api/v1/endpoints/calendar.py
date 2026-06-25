@@ -171,9 +171,10 @@ async def calendar_callback(
 
     await db.commit()
 
-    # Redirect browser back to frontend success page
-    # Change this URL to your actual frontend success route
-    return RedirectResponse(url="https://aura-health-frontend-five.vercel.app?calendar_connected=true")
+    # Redirect browser back to the frontend success page.
+    # FRONTEND_URL is set per environment — Vercel URL in prod, localhost in dev.
+    frontend_url = settings.FRONTEND_URL.rstrip("/")
+    return RedirectResponse(url=f"{frontend_url}/?calendar_connected=true")
 
 
 @router.get("/status")

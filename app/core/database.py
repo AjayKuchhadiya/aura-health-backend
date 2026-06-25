@@ -1,5 +1,6 @@
 import logging
 
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 from .config import settings
@@ -33,6 +34,10 @@ async def get_db():
     async with AsyncSessionLocal() as session:
         try:
             yield session
+        except HTTPException:
+            # HTTPExceptions are intentional control flow (4xx/5xx responses),
+            # not DB errors — skip rollback and re-raise cleanly.
+            raise
         except Exception:
             logger.exception("Database session error — rolling back")
             await session.rollback()

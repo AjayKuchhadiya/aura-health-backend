@@ -41,6 +41,21 @@ async def upload_health_record(
 
     def _upload():
         client = _get_client()
+
+        # Auto-create the bucket if it doesn't exist yet.
+        # list_buckets() returns the existing buckets; if ours is missing we
+        # create it as a public bucket so get_public_url() works without
+        # generating signed URLs.
+        try:
+            existing = [b.name for b in client.storage.list_buckets()]
+            if _BUCKET not in existing:
+                client.storage.create_bucket(_BUCKET, options={"public": True})
+                logger.info("Created Supabase storage bucket: %s", _BUCKET)
+        except Exception as bucket_exc:
+            # Non-fatal — the upload call itself will fail with a clear error
+            # if the bucket still doesn't exist.
+            logger.warning("Could not verify/create bucket '%s': %s", _BUCKET, bucket_exc)
+
         client.storage.from_(_BUCKET).upload(
             path=object_path,
             file=file_bytes,

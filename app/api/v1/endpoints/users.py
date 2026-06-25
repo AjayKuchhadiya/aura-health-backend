@@ -1,15 +1,20 @@
+import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
 from app.core.database import get_db
 from app.api.deps import get_current_user_token
+from app.models.lab_result import LabResult as LabResultModel
+from app.models.medication import Medication as MedicationModel
 from app.models.user import User as UserModel
 from app.models.doctor import Doctor as DoctorModel
 from app.schemas.patient import PatientOnboarding, PatientProfileResponse
 from app.schemas.doctor import DoctorOnboarding, DoctorProfileResponse
+from app.services.fhir_export import build_fhir_bundle
 
 logger = logging.getLogger(__name__)
 
@@ -118,3 +123,57 @@ async def onboard_doctor(
 
     # Return wrapped response matching the contract
     return {"message": "Doctor profile created successfully", "data": new_doctor}
+
+
+@router.get("/export/fhir")
+async def export_fhir(
+    token_data: dict = Depends(get_current_user_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Export the user's complete Digital Twin as a FHIR R4 Bundle.
+
+    Returns a downloadable JSON file containing:
+    - Patient resource (profile, allergies, conditions, address)
+    - MedicationStatement resources (one per active/past medication)
+    - Observation resources (one per lab result, with LOINC codes
+      for all standard Indian panel tests)
+
+    The Bundle conforms to FHIR R4 and can be imported into any
+    FHIR-compatible EHR or PHR system (e.g. ABDM Health Locker).
+    """
+    firebase_uid = token_data.get("uid")
+
+    user_result = await db.execute(
+        select(UserModel).where(UserModel.firebase_uid == firebase_uid)
+    )
+    user = user_result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    meds_result = await db.execute(
+        select(MedicationModel)
+        .where(MedicationModel.user_id == user.id)
+        .order_by(MedicationModel.start_date.asc())
+    )
+    medications = meds_result.scalars().all()
+
+    labs_result = await db.execute(
+        select(LabResultModel)
+        .where(LabResultModel.user_id == user.id)
+        .order_by(LabResultModel.date_taken.asc().nulls_last())
+    )
+    lab_results = labs_result.scalars().all()
+
+    bundle = build_fhir_bundle(
+        user=user,
+        medications=list(medications),
+        lab_results=list(lab_results),
+    )
+
+    filename = f"aura-fhir-export-user{user.id}.json"
+    return Response(
+        content=json.dumps(bundle, indent=2, ensure_ascii=False),
+        media_type="application/fhir+json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

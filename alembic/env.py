@@ -16,6 +16,7 @@ from app.models.user import User
 from app.models.doctor import Doctor
 from app.models.medication import Medication
 from app.models.user_calendar_token import UserCalendarToken
+from app.models.lab_result import LabResult
 
 config = context.config
 

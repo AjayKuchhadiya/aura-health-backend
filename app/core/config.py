@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # Secret key used to sign the OAuth state token (any random string)
     CALENDAR_STATE_SECRET: str = "change-me-to-a-random-secret"
 
+    # Frontend base URL — used for OAuth redirects after Google callback.
+    # Override with FRONTEND_URL=http://localhost:5173 in .env for local dev.
+    FRONTEND_URL: str = "https://aura-health-frontend-five.vercel.app"
+
     # This configuration allows extra fields in .env without crashing
     model_config = SettingsConfigDict(
         env_file=str(Path(__file__).parent.parent.parent / ".env"),

@@ -13,6 +13,9 @@ from app.api.deps import get_current_user_token
 from app.core.database import get_db
 from app.models.medication import Medication as MedicationModel
 from app.models.user import User as UserModel
+from app.models.user_calendar_token import UserCalendarToken
+from app.services.calendar import create_medication_reminder, delete_calendar_event, decrypt_token
+from app.services.rxnav import check_drug_interactions
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +31,7 @@ class MedicationCreate(BaseModel):
     medication_name: str
     dosage: str
     frequency: str
+    reminder_time: Optional[str] = None   # "HH:MM" 24-hour, e.g. "08:00"
     start_date: date
     end_date: Optional[date] = None
     notes: Optional[str] = None
@@ -37,6 +41,7 @@ class MedicationUpdate(BaseModel):
     medication_name: Optional[str] = None
     dosage: Optional[str] = None
     frequency: Optional[str] = None
+    reminder_time: Optional[str] = None
     start_date: Optional[date] = None
     end_date: Optional[date] = None
     notes: Optional[str] = None
@@ -49,6 +54,7 @@ class MedicationRead(BaseModel):
     medication_name: str
     dosage: str
     frequency: str
+    reminder_time: Optional[str] = None
     start_date: date
     end_date: Optional[date] = None
     notes: Optional[str] = None
@@ -57,6 +63,12 @@ class MedicationRead(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class MedicationCreateResponse(MedicationRead):
+    """Extends MedicationRead with an optional drug interaction warning."""
+    interaction_warning: Optional[str] = None
+    interactions_found: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +91,7 @@ async def _resolve_user(firebase_uid: str, db: AsyncSession) -> UserModel:
 # ---------------------------------------------------------------------------
 
 
-@router.post("/", response_model=MedicationRead, status_code=status.HTTP_201_CREATED)
+@router.post("/", response_model=MedicationCreateResponse, status_code=status.HTTP_201_CREATED)
 async def create_medication(
     payload: MedicationCreate,
     token_data: dict = Depends(get_current_user_token),
@@ -88,15 +100,28 @@ async def create_medication(
     """
     Add a new medication to the user's regimen.
 
-    After saving, ask Aura via POST /chat/run to schedule recurring Google
-    Calendar reminders — the agent will invoke the MCP calendar tools.
+    Before saving, checks for drug-drug interactions between the new medication
+    and the user's existing regimen via the NLM RxNav API. If a conflict is
+    found, an AI-translated patient-friendly warning is included in the response.
+    The medication is always saved — the warning is advisory only, prompting the
+    user to consult their doctor.
     """
     user = await _resolve_user(token_data["uid"], db)
+
+    # Fetch existing medication names for interaction check
+    existing_result = await db.execute(
+        select(MedicationModel.medication_name)
+        .where(MedicationModel.user_id == user.id)
+    )
+    existing_names: list[str] = [row[0] for row in existing_result.all()]
+
+    # Save the new medication first
     med = MedicationModel(
         user_id=user.id,
         medication_name=payload.medication_name,
         dosage=payload.dosage,
         frequency=payload.frequency,
+        reminder_time=payload.reminder_time,
         start_date=payload.start_date,
         end_date=payload.end_date,
         notes=payload.notes,
@@ -105,7 +130,63 @@ async def create_medication(
     await db.commit()
     await db.refresh(med)
     logger.info("Medication created — user_id: %s, med_id: %s", user.id, med.id)
-    return med
+
+    # Run interaction check (non-blocking — failure returns no warning, not an error)
+    interaction_warning: Optional[str] = None
+    interactions_found: int = 0
+    try:
+        result = await check_drug_interactions(
+            new_drug=payload.medication_name,
+            existing_drugs=existing_names,
+        )
+        if result["has_interaction"]:
+            interaction_warning = result["warning"]
+            interactions_found = result["interactions_found"]
+            logger.warning(
+                "Drug interaction detected — user_id: %s, new_med: %s, interactions: %d",
+                user.id, payload.medication_name, interactions_found,
+            )
+    except Exception as exc:
+        logger.warning("Interaction check failed (non-fatal): %s", exc)
+
+    response_data = MedicationCreateResponse.model_validate(med)
+    response_data.interaction_warning = interaction_warning
+    response_data.interactions_found = interactions_found
+
+    # Auto-create Google Calendar reminders if the user has connected their
+    # calendar and provided a reminder_time.
+    if payload.reminder_time:
+        try:
+            cal_result = await db.execute(
+                select(UserCalendarToken).where(UserCalendarToken.user_id == user.id)
+            )
+            cal_token = cal_result.scalars().first()
+            if cal_token:
+                event_ids = await create_medication_reminder(
+                    access_token=decrypt_token(cal_token.encrypted_access_token),
+                    refresh_token=decrypt_token(cal_token.encrypted_refresh_token),
+                    token_expiry=cal_token.token_expiry,
+                    medication_name=payload.medication_name,
+                    dosage=payload.dosage,
+                    frequency=payload.frequency,
+                    start_date=str(payload.start_date),
+                    start_time=payload.reminder_time,
+                    timezone="Asia/Kolkata",
+                )
+                med.google_calendar_event_id = ",".join(event_ids)
+                await db.commit()
+                await db.refresh(med)
+                logger.info(
+                    "Calendar events created — med_id: %s, events: %s",
+                    med.id, med.google_calendar_event_id,
+                )
+                response_data = MedicationCreateResponse.model_validate(med)
+                response_data.interaction_warning = interaction_warning
+                response_data.interactions_found = interactions_found
+        except Exception as exc:
+            logger.warning("Calendar event creation failed (non-fatal): %s", exc)
+
+    return response_data
 
 
 @router.get("/", response_model=List[MedicationRead])
@@ -192,6 +273,30 @@ async def delete_medication(
     med = result.scalars().first()
     if not med:
         raise HTTPException(status_code=404, detail="Medication not found")
+
+    # Clean up Google Calendar events if any were created
+    if med.google_calendar_event_id:
+        try:
+            cal_result = await db.execute(
+                select(UserCalendarToken).where(UserCalendarToken.user_id == user.id)
+            )
+            cal_token = cal_result.scalars().first()
+            if cal_token:
+                access_token = decrypt_token(cal_token.encrypted_access_token)
+                refresh_token = decrypt_token(cal_token.encrypted_refresh_token)
+                for event_id in med.google_calendar_event_id.split(","):
+                    event_id = event_id.strip()
+                    if event_id:
+                        await delete_calendar_event(
+                            access_token=access_token,
+                            refresh_token=refresh_token,
+                            token_expiry=cal_token.token_expiry,
+                            event_id=event_id,
+                        )
+                logger.info("Calendar events deleted for med_id: %s", medication_id)
+        except Exception as exc:
+            logger.warning("Calendar cleanup failed (non-fatal): %s", exc)
+
     await db.delete(med)
     await db.commit()
     logger.info("Medication deleted — med_id: %s", medication_id)

@@ -23,7 +23,10 @@ if not firebase_admin._apps:
 def verify_id_token(token: str):
     """Verifies a Firebase ID token and returns the decoded token dict."""
     try:
-        decoded_token = auth.verify_id_token(token)
+        # clock_skew_seconds=10 tolerates up to 10 s of clock drift between
+        # the client and server — critical for freshly created Firebase accounts
+        # whose tokens can arrive with an iat slightly ahead of the server clock.
+        decoded_token = auth.verify_id_token(token, clock_skew_seconds=10)
         logger.debug("Firebase token verified for uid: %s", decoded_token.get("uid"))
         return decoded_token
     except Exception as e:

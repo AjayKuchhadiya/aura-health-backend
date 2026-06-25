@@ -104,14 +104,13 @@ async def run_chat(
         if not request.session_id:
             logger.debug("Generated new session_id: %s", session_id)
 
-        # Get response from the ADK Runner, passing the user's profile, DB id, and location
+        # Get response from the ADK Runner, passing the user's profile and DB id
         reply_text = await aura_agent.get_chat_response(
             message=request.message,
             session_id=session_id,
             user_id=user_uid,
             user_db_id=user_db_id,
             medical_profile=medical_profile,
-            location=location_dict,
         )
 
         logger.info(
@@ -121,8 +120,40 @@ async def run_chat(
         )
         return ChatResponse(reply=reply_text, session_id=session_id)
 
+    except HTTPException:
+        raise  # re-raise FastAPI exceptions unchanged (includes 503 from agent.py)
+
     except Exception as e:
+        # If agent.py raised an HTTPException (e.g. 503 after fallback exhausted),
+        # let it bubble up unchanged instead of wrapping it in a 500.
+        if isinstance(e, HTTPException):
+            raise
+        err_str = str(e)
+        # Gemini 503 — model overloaded
+        if "503" in err_str or "UNAVAILABLE" in err_str:
+            logger.warning(
+                "Gemini 503 for uid: %s — %s", token_data.get("uid"), err_str
+            )
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Aura's AI engine is experiencing high demand right now. "
+                    "Please wait a moment and try again."
+                ),
+            )
+        # Gemini 429 — free-tier quota exhausted
+        if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+            logger.warning(
+                "Gemini 429 for uid: %s — %s", token_data.get("uid"), err_str
+            )
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    "Aura has reached its daily request limit. "
+                    "Please try again tomorrow or contact support to upgrade the plan."
+                ),
+            )
         logger.exception(
             "Chat endpoint error for uid: %s — %s", token_data.get("uid"), e
         )
-        raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Agent error: {err_str}")
