@@ -20,6 +20,7 @@ and extract ALL structured medical information.
 
 Return ONLY valid JSON with this exact schema — no markdown fences, no prose:
 {
+  "document_title": "string — a short, descriptive title for this document in plain English (e.g. 'Blood Count (CBC) Report', 'Diabetes & Thyroid Panel', 'Prescription — Hypertension', 'Lipid Profile Report', 'Discharge Summary'). Max 60 characters.",
   "medications": [
     {
       "name": "string (brand name exactly as written, e.g. 'Glycomet SR 500', 'Thyronorm 50')",

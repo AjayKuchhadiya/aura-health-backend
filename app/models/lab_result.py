@@ -18,6 +18,9 @@ class LabResult(Base):
         nullable=False,
         index=True,
     )
+    # UUID string linking this row to the health_records JSONB entry it came from.
+    # Allows fetching/deleting all labs from a single uploaded file.
+    upload_id = Column(String, nullable=True, index=True)
     test_name = Column(String, nullable=False, index=True)
     value = Column(Float, nullable=False)
     unit = Column(String, nullable=True)
