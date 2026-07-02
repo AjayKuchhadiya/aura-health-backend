@@ -1,10 +1,14 @@
+import copy
 import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy.orm.attributes import flag_modified
+from typing import List, Optional
 
 from app.core.database import get_db
 from app.api.deps import get_current_user_token
@@ -177,3 +181,182 @@ async def export_fhir(
         media_type="application/fhir+json",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# Settings endpoints
+# ---------------------------------------------------------------------------
+
+class MeResponse(BaseModel):
+    id: int
+    email: str
+    username: Optional[str]
+    role: str
+    phone: Optional[str]
+    date_of_birth: Optional[str]
+    timezone: Optional[str]
+    blood_type: Optional[str]
+    allergies: List[str]
+    chronic_conditions: List[str]
+    past_surgeries: List[str]
+    family_history: Optional[str]
+    emergency_contact_name: Optional[str]
+    emergency_contact_relationship: Optional[str]
+    emergency_contact_phone: Optional[str]
+
+    class Config:
+        from_attributes = True
+
+
+class MeUpdatePayload(BaseModel):
+    username: Optional[str] = None
+    phone: Optional[str] = None
+    date_of_birth: Optional[str] = None
+    timezone: Optional[str] = None
+    blood_type: Optional[str] = None
+    allergies: Optional[List[str]] = None
+    chronic_conditions: Optional[List[str]] = None
+    past_surgeries: Optional[List[str]] = None
+    family_history: Optional[str] = None
+    emergency_contact_name: Optional[str] = None
+    emergency_contact_relationship: Optional[str] = None
+    emergency_contact_phone: Optional[str] = None
+
+
+@router.get("/me", response_model=MeResponse)
+async def get_me(
+    token_data: dict = Depends(get_current_user_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the current user's profile and settings."""
+    result = await db.execute(
+        select(UserModel).where(UserModel.firebase_uid == token_data["uid"])
+    )
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    profile = user.medical_profile or {}
+    med_history = profile.get("medical_history") or {}
+    emergency = profile.get("emergency_contact") or {}
+    location = profile.get("location") or {}
+
+    return MeResponse(
+        id=user.id,
+        email=user.email,
+        username=user.username,
+        role=user.role,
+        phone=profile.get("phone"),
+        date_of_birth=profile.get("date_of_birth"),
+        timezone=location.get("timezone") or user.timezone,
+        blood_type=med_history.get("blood_type"),
+        allergies=med_history.get("allergies") or [],
+        chronic_conditions=med_history.get("chronic_conditions") or [],
+        past_surgeries=med_history.get("past_surgeries") or [],
+        family_history=med_history.get("family_history"),
+        emergency_contact_name=emergency.get("name"),
+        emergency_contact_relationship=emergency.get("relationship"),
+        emergency_contact_phone=emergency.get("phone"),
+    )
+
+
+@router.patch("/me", response_model=MeResponse)
+async def update_me(
+    payload: MeUpdatePayload,
+    token_data: dict = Depends(get_current_user_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update display name, health info, timezone, and emergency contact."""
+    result = await db.execute(
+        select(UserModel).where(UserModel.firebase_uid == token_data["uid"])
+    )
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if payload.username is not None:
+        user.username = payload.username.strip() or user.username
+
+    profile = copy.deepcopy(user.medical_profile or {})
+
+    if payload.phone is not None:
+        profile["phone"] = payload.phone
+    if payload.date_of_birth is not None:
+        profile["date_of_birth"] = payload.date_of_birth
+
+    # Timezone stored in both user column and profile.location
+    if payload.timezone is not None:
+        user.timezone = payload.timezone
+        loc = profile.setdefault("location", {})
+        loc["timezone"] = payload.timezone
+
+    med_history = profile.setdefault("medical_history", {})
+    if payload.blood_type is not None:
+        med_history["blood_type"] = payload.blood_type
+    if payload.allergies is not None:
+        med_history["allergies"] = payload.allergies
+    if payload.chronic_conditions is not None:
+        med_history["chronic_conditions"] = payload.chronic_conditions
+    if payload.past_surgeries is not None:
+        med_history["past_surgeries"] = payload.past_surgeries
+    if payload.family_history is not None:
+        med_history["family_history"] = payload.family_history
+
+    emergency = profile.setdefault("emergency_contact", {})
+    if payload.emergency_contact_name is not None:
+        emergency["name"] = payload.emergency_contact_name
+    if payload.emergency_contact_relationship is not None:
+        emergency["relationship"] = payload.emergency_contact_relationship
+    if payload.emergency_contact_phone is not None:
+        emergency["phone"] = payload.emergency_contact_phone
+
+    user.medical_profile = profile
+    flag_modified(user, "medical_profile")
+    await db.commit()
+    await db.refresh(user)
+    logger.info("User profile updated — user_id: %s", user.id)
+
+    # Re-read updated profile
+    profile = user.medical_profile or {}
+    med_history = profile.get("medical_history") or {}
+    emergency = profile.get("emergency_contact") or {}
+    location = profile.get("location") or {}
+
+    return MeResponse(
+        id=user.id,
+        email=user.email,
+        username=user.username,
+        role=user.role,
+        phone=profile.get("phone"),
+        date_of_birth=profile.get("date_of_birth"),
+        timezone=location.get("timezone") or user.timezone,
+        blood_type=med_history.get("blood_type"),
+        allergies=med_history.get("allergies") or [],
+        chronic_conditions=med_history.get("chronic_conditions") or [],
+        past_surgeries=med_history.get("past_surgeries") or [],
+        family_history=med_history.get("family_history"),
+        emergency_contact_name=emergency.get("name"),
+        emergency_contact_relationship=emergency.get("relationship"),
+        emergency_contact_phone=emergency.get("phone"),
+    )
+
+
+@router.delete("/me", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_me(
+    token_data: dict = Depends(get_current_user_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Permanently delete the current user's account and all associated data.
+    This action is irreversible.
+    """
+    result = await db.execute(
+        select(UserModel).where(UserModel.firebase_uid == token_data["uid"])
+    )
+    user = result.scalars().first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    await db.delete(user)
+    await db.commit()
+    logger.info("User account deleted — firebase_uid: %s", token_data["uid"])
