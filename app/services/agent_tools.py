@@ -18,11 +18,14 @@ Rules for every tool function:
 from __future__ import annotations
 
 import logging
+from datetime import date
 from typing import Optional
 
+from sqlalchemy import or_
 from sqlalchemy.future import select
 
 from app.core.database import AsyncSessionLocal
+from app.models.medication import Medication as MedicationModel
 from app.models.user import User as UserModel
 from app.models.user_calendar_token import UserCalendarToken
 
@@ -48,8 +51,18 @@ async def log_health_update(user_db_id: int, update_data: dict) -> dict:
         update_data: A dict of health data to merge into the 'daily_logs' list
                      inside the user's medical_profile.  Include a 'date' key
                      (ISO 8601) and any relevant fields the user mentioned.
-                     Example: {"date": "2024-01-15", "symptoms": ["headache"],
-                               "mood": "tired", "weight_kg": 72.5}
+                     Use this schema (only include keys that were actually discussed):
+                     {
+                       "date": "<today's ISO 8601 date>",
+                       "type": "symptom|vitals|mood|general",
+                       "symptoms": ["symptom1", "symptom2"],
+                       "severity": 7,
+                       "duration": "since this morning",
+                       "triggers": ["skipped lunch", "stress"],
+                       "mood": "anxious",
+                       "medication_taken": "ibuprofen 400mg",
+                       "notes": "any other context the user mentioned"
+                     }
 
     Returns:
         {"success": True} on success, or {"error": "..."} on failure.
@@ -164,10 +177,111 @@ async def create_calendar_event(
 
 
 # ---------------------------------------------------------------------------
+# Active medications tool
+# ---------------------------------------------------------------------------
+
+
+async def get_active_medications(user_db_id: int) -> dict:
+    """
+    Retrieve the patient's current active medications from the database.
+
+    Call this tool proactively whenever the user asks about their medications,
+    wants to check dosages or schedules, discusses adherence, asks about drug
+    interactions, or when scheduling a new medication reminder.
+
+    Args:
+        user_db_id: The user's integer database ID ({user_db_id} from session state).
+
+    Returns:
+        {"medications": [...], "count": N} on success, or {"error": "..."} on failure.
+        Each entry includes: id, medication_name, dosage, frequency, reminder_time,
+        start_date, end_date, notes.
+    """
+    logger.info("Tool: get_active_medications — user_db_id=%s", user_db_id)
+    try:
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(MedicationModel)
+                .where(
+                    MedicationModel.user_id == user_db_id,
+                    or_(
+                        MedicationModel.end_date.is_(None),
+                        MedicationModel.end_date >= date.today(),
+                    ),
+                )
+                .order_by(MedicationModel.start_date.desc())
+            )
+            medications = result.scalars().all()
+            med_list = [
+                {
+                    "id": m.id,
+                    "medication_name": m.medication_name,
+                    "dosage": m.dosage,
+                    "frequency": m.frequency,
+                    "reminder_time": m.reminder_time,
+                    "start_date": str(m.start_date) if m.start_date else None,
+                    "end_date": str(m.end_date) if m.end_date else None,
+                    "notes": m.notes,
+                }
+                for m in medications
+            ]
+        return {"medications": med_list, "count": len(med_list)}
+    except Exception as exc:
+        logger.exception("get_active_medications failed")
+        return {"error": f"Failed to fetch medications: {exc}"}
+
+
+# ---------------------------------------------------------------------------
+# Health diary retrieval tool
+# ---------------------------------------------------------------------------
+
+
+async def get_health_diary(user_db_id: int, limit: int = 10) -> dict:
+    """
+    Retrieve recent health diary entries from the patient's Digital Twin profile.
+
+    Call this tool when the user asks about past symptoms, health trends,
+    recurring patterns, or when preparing structured questions for a doctor's
+    appointment. Increase limit to 20–30 for deeper longitudinal analysis.
+
+    Args:
+        user_db_id: The user's integer database ID ({user_db_id} from session state).
+        limit:      Maximum number of recent entries to return (default 10, max 30).
+
+    Returns:
+        {"entries": [...], "count": N, "total": M} on success, most-recent first.
+        Returns {"error": "..."} on failure.
+    """
+    logger.info("Tool: get_health_diary — user_db_id=%s, limit=%s", user_db_id, limit)
+    try:
+        limit = min(int(limit), 30)  # hard cap to avoid context overflow
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(UserModel).where(UserModel.id == user_db_id)
+            )
+            user = result.scalars().first()
+            if not user:
+                return {"error": f"User {user_db_id} not found."}
+            all_logs = list((user.medical_profile or {}).get("daily_logs", []))
+
+        recent_logs = list(reversed(all_logs[-limit:]))
+        return {
+            "entries": recent_logs,
+            "count": len(recent_logs),
+            "total": len(all_logs),
+        }
+    except Exception as exc:
+        logger.exception("get_health_diary failed")
+        return {"error": f"Failed to fetch health diary: {exc}"}
+
+
+# ---------------------------------------------------------------------------
 # Public list of all tools to register with the agent
 # ---------------------------------------------------------------------------
 
 AGENT_TOOLS = [
+    get_active_medications,
+    get_health_diary,
     log_health_update,
     create_calendar_event,
 ]
